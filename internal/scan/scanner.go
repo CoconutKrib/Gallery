@@ -50,16 +50,17 @@ func NewScanner(cfg *config.Config, db *sql.DB, libraryPathID int64) (*Scanner, 
 		s.whitelist = append(s.whitelist, WhitelistEntry{Make: e.Make, Model: e.Model})
 	}
 
-	// Compile filename regexes.
+	// Compile filename regexes. Patterns are matched case-insensitively; prepend
+	// (?i) unless the pattern already opens with it.
 	for _, pat := range cfg.FilenameFilters.Include {
-		re, err := regexp.Compile(pat)
+		re, err := regexp.Compile(caseInsensitivePattern(pat))
 		if err != nil {
 			return nil, fmt.Errorf("invalid include pattern %q: %w", pat, err)
 		}
 		s.includeRe = append(s.includeRe, re)
 	}
 	for _, pat := range cfg.FilenameFilters.Exclude {
-		re, err := regexp.Compile(pat)
+		re, err := regexp.Compile(caseInsensitivePattern(pat))
 		if err != nil {
 			return nil, fmt.Errorf("invalid exclude pattern %q: %w", pat, err)
 		}
@@ -222,21 +223,37 @@ func isSupportedExtension(name string) bool {
 }
 
 // passesFilenameFilters returns false if the filename is rejected by include/exclude rules.
+// Logic: include (file must match at least one pattern if any are defined), then
+// exclude overrides — even if a file matched an include, an exclude match rejects it.
 func (s *Scanner) passesFilenameFilters(name string) bool {
+	// 1. Must satisfy include list (if one is configured).
+	if len(s.includeRe) > 0 {
+		matched := false
+		for _, re := range s.includeRe {
+			if re.MatchString(name) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	// 2. Exclude beats include — if any exclude pattern matches, reject.
 	for _, re := range s.excludeRe {
 		if re.MatchString(name) {
 			return false
 		}
 	}
-	if len(s.includeRe) == 0 {
-		return true
+	return true
+}
+
+// caseInsensitivePattern wraps a regex pattern with (?i) unless it already has it.
+func caseInsensitivePattern(pat string) string {
+	if strings.HasPrefix(pat, "(?i)") || strings.HasPrefix(pat, "(?-i)") {
+		return pat
 	}
-	for _, re := range s.includeRe {
-		if re.MatchString(name) {
-			return true
-		}
-	}
-	return false
+	return "(?i)" + pat
 }
 
 // recordDuplicateIfNew attempts to insert a duplicate_paths record.

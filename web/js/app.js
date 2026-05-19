@@ -11,6 +11,8 @@ Gallery.router = (() => {
     { pattern: /^\/search$/, page: 'search' },
     { pattern: /^\/timeline$/, page: 'timeline' },
     { pattern: /^\/map$/, page: 'map' },
+    { pattern: /^\/events(?:\/(\d+))?$/, page: 'events' },
+    { pattern: /^\/dedup$/, page: 'dedup' },
     { pattern: /^\/settings$/, page: 'settings' },
     { pattern: /^\/$/, page: 'home' },
   ];

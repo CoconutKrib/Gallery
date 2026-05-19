@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/halleck/gallery/internal/cluster"
 	"github.com/halleck/gallery/internal/config"
 	"github.com/halleck/gallery/internal/db"
 	"github.com/halleck/gallery/internal/scan"
@@ -178,5 +179,15 @@ func (sm *ScanManager) runScans(paths []config.LibraryPath) {
 		}
 		log.Printf("[scan] %q done — found:%d skipped:%d ingested:%d duplicate:%d errors:%d",
 			lp.Path, stats.Found, stats.Skipped, stats.Ingested, stats.Duplicate, stats.Errors)
+	}
+
+	// Re-cluster after all scans complete.
+	gapDays := sm.cfg.EventGapDays
+	geoKm := sm.cfg.EventGeoKm
+	log.Printf("[cluster] running event clustering (gap=%dd, geo=%.0fkm)", gapDays, geoKm)
+	if err := cluster.Run(sm.database, gapDays, geoKm); err != nil {
+		log.Printf("[cluster] error: %v", err)
+	} else {
+		log.Printf("[cluster] done")
 	}
 }

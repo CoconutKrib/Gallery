@@ -17,7 +17,8 @@ go run . --config test_config.json --scan
 # Start HTTP server
 go run . --config test_config.json          # listens on :8080
 
-# Verify scan is idempotent (should show skipped:5, ingested:0)
+# Verify scan is idempotent (should show skipped:7, ingested:0)
+# (7 = 5 originals + 2 copies in samples/duplicates/)
 go run . --config test_config.json --scan
 ```
 
@@ -32,6 +33,7 @@ go run . --config test_config.json --scan
 | Auth | `golang.org/x/crypto/bcrypt` |
 | Frontend | Vanilla JS, no framework, no build step |
 | Charts | Plotly basic bundle vendored at `web/vendor/plotly.min.js` |
+| Maps | Leaflet 1.9.4 vendored at `web/vendor/leaflet/` |
 
 ## Key conventions
 
@@ -41,6 +43,7 @@ go run . --config test_config.json --scan
 - **Go 1.22+ mux patterns** — method in pattern string: `"GET /api/photos"`. Path values via `r.PathValue("sha256")`.
 - **Security**: all file serving validates paths are within configured library roots or cache dir (`pathIsWithinRoots`). Never serve arbitrary filesystem paths.
 - **Auth middleware** — no-op when `auth.enabled = false`. API routes 401, page routes redirect to `/login`.
+- **Filename filters are case-insensitive** — all include/exclude regex patterns are automatically wrapped with `(?i)` at compile time (`caseInsensitivePattern()` in `scanner.go`). Exclude beats include: if both lists are configured, a file must pass include first, then not match any exclude.
 
 ## Project structure
 
@@ -52,35 +55,51 @@ internal/
     db.go                      # Open SQLite (WAL, FK on), run embed.FS migrations
     migrations/001_initial.sql # Full schema
     photos.go                  # Photo CRUD; InsertPhoto, scanPhotoRows
-    queries.go                 # PhotoFilter + ListPhotosFiltered, GetGeotaggedPhotos
+    queries.go                 # PhotoFilter + ListPhotosFiltered, GetGeotaggedPhotos, GetPhotosNearby
     duplicates.go              # duplicate_paths CRUD
+    events.go                  # Event + photo_events CRUD (ClearEvents, InsertEvent, GetAllEvents, GetPhotosForEvent, GetEventForPhoto)
+    dedup_report.go            # GetLibraryDedupSummaries, GetCrossPathOverlap, GetSubtreeDedupEntries
     library_paths.go           # UpsertLibraryPath, GetLibraryPathByID
     scan_runs.go               # InsertScanRun, FinishScanRun, GetAllLatestScanRuns
   scan/
-    scanner.go                 # Walk + filter; OnProgress callback; canonical-path dedup fix
+    scanner.go                 # Walk + filter; OnProgress callback; canonical-path dedup fix; case-insensitive filename filters ((?i) wrap)
+    scanner_filter_test.go     # Tests for include/exclude filter logic (case sensitivity, exclude-beats-include, multiple patterns)
     exif.go                    # EXIF extraction; Flags() returns []string{} never nil
     hash.go                    # SHA-256
     thumbnail.go               # 400px long-edge JPEG; idempotent
+  cluster/
+    cluster.go                 # Rule-based event clustering (gap days + geo distance); called after every scan
   auth/auth.go                 # In-memory session store (token→expiry), bcrypt, cookie
   api/
     router.go                  # Handlers struct, RegisterRoutes, authMiddleware, helpers
-    photos.go                  # /api/photos (q, from, to, make, model, has_gps, flag)
+    photos.go                  # /api/photos (q, from, to, make, model, has_gps, flag); detail includes event_id + duplicates
     browse.go                  # /api/browse/{library_id}/{path...}, /api/libraries
-    scan.go                    # ScanManager, /api/scan trigger+status
+    scan.go                    # ScanManager, /api/scan trigger+status; triggers cluster.Run after scan
+    map.go                     # /api/map (all pins), /api/map/nearby?lat&lon&radius_km
     timeline.go                # /api/timeline?zoom=decade|year|month|week|day
+    events.go                  # /api/events, /api/events/{id}
+    dedup.go                   # /api/dedup/report, /api/dedup/subtree?prefix=
     settings.go                # /api/settings, /api/login, /api/logout, /api/issues
 web/
-  index.html                   # SPA shell; loads vendor/plotly.min.js + all JS modules
+  index.html                   # SPA shell; loads all JS modules
   css/app.css                  # Dark theme (CSS custom properties)
   js/
-    app.js                     # History API router
-    utils.js                   # api(), formatDate, esc, navigate, setActiveNav
+    app.js                     # History API router (routes: browse, photo, search, timeline, map, events, dedup, settings)
+    utils.js                   # api(), formatDate, formatCoord, esc, navigate, setActiveNav
     browse.js                  # Folder browser + photo grid
-    photo.js                   # Photo detail + EXIF table + duplicates
+    photo.js                   # Photo detail + EXIF table + duplicates + event link
     search.js                  # Filter form + paginated grid (URL query state)
     timeline.js                # Plotly bar chart + click-to-grid
+    map.js                     # Leaflet map, all pins + radius search with circle overlay
+    events.js                  # Event list cards + event detail photo grid
+    dedup.js                   # Per-library summary, cross-library overlap, subtree analyser
     settings.js                # Library paths, scan trigger/poll, config display
-  vendor/plotly.min.js         # Plotly basic bundle (~1MB, vendored)
+  vendor/
+    plotly.min.js              # Plotly basic bundle (~1MB, vendored)
+    leaflet/                   # Leaflet 1.9.4 (JS, CSS, marker images)
+samples/
+  *.JPG / *.jpg                # 5 real test photos from 4 cameras
+  duplicates/                  # Byte-identical copies of 2 samples (for dedup testing)
 ```
 
 ## Phase status
@@ -89,7 +108,7 @@ web/
 - ✅ **Phase 2** — HTTP server, auth, browse API, photo detail API, scan manager, settings API, frontend SPA.
 - ✅ **Phase 3** — Search/filter view, timeline view (Plotly), `/api/timeline` endpoint.
 - ✅ **Phase 4** — Geo/map view (Leaflet, radius search, server-side Haversine).
-- ⬜ **Phase 5** — Event clustering (rule-based, `internal/cluster`), event browsing, dedup report.
+- ✅ **Phase 5** — Event clustering (rule-based, `internal/cluster`), event browsing (`/events`, `/api/events`), dedup report (`/dedup`, `/api/dedup/report`, `/api/dedup/subtree`).
 - ⬜ **Phase 6** — Settings UI enhancements (inline editing of whitelist/filters, issues panel).
 
 ## Known issues / backlog (from TODO.md)
@@ -97,10 +116,13 @@ web/
 - Manual lat/lon override for photos missing GPS — store as sidecar-style DB data with an `approximate` flag and optional radius.
 - Notes/description fields per photo.
 - Export of data/metadata.
+- Settings UI enhancements: inline editing of camera whitelist, filename filters, issues panel (Phase 6).
 
 ## Sample data
 
 `samples/` contains 5 test JPEGs from 4 cameras (HTC One, Canon EOS 700D, Apple iPhone SE, Samsung Techwin L100). The iPhone SE photo has real GPS coordinates. `test_config.json` whitelists all four cameras with `scan_workers: 2`.
+
+`samples/duplicates/` contains byte-identical copies of `SDC12869.JPG` and `IMG_0361.JPG`, used to exercise the duplicate detection and dedup report. A clean scan should show: found:7, ingested:5, duplicate:2, then cluster into 4 events.
 
 ## Gotchas encountered
 
@@ -108,3 +130,5 @@ web/
 - **Rescan false-duplicates** — `PhotoExistsByHash` alone isn't enough. Compare `GetCanonicalFilepath` against the current path; only insert into `duplicate_paths` when they differ.
 - **`flags` stores `"null"`** when inserting a nil `[]string`. Fix: initialise as `[]string{}` in `exif.go` and guard in `normalizeFlags()`.
 - **`captured_at` strftime failure** — Go's `time.Time.String()` produces `"2012-04-15 18:58:46 +0100 BST"` which SQLite cannot parse with `strftime`. Always format as `time.RFC3339` before inserting.
+- **Filename filter case sensitivity** — regex patterns compiled as-is are case-sensitive; `^dscn` won't match `DSCN0042.JPG`. All patterns are wrapped with `(?i)` via `caseInsensitivePattern()` before compiling.
+- **Cluster `photoPoint` type** must be declared at package scope, not inside `Run()`, because `centroid()` takes `[]photoPoint` as a parameter.

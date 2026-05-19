@@ -105,8 +105,11 @@ func (h *Handlers) handlePhotoDetail(w http.ResponseWriter, r *http.Request) {
 		dupeList = []map[string]any{}
 	}
 
+	eventID, _ := db.GetEventForPhoto(h.db, photo.ID)
+
 	out := photoDetail(*photo)
 	out["duplicates"] = dupeList
+	out["event_id"] = eventID
 	writeJSON(w, http.StatusOK, out)
 }
 

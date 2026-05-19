@@ -36,7 +36,7 @@ The application is a single Go binary that serves both the REST API and all fron
 
 ```
 gallery/
-├── main.go                  # Entry point: loads config, opens DB, starts server
+├── main.go                  # Entry point: loads config, opens DB, triggers scan/cluster, starts server
 ├── config.json              # Runtime configuration (user-editable)
 ├── gallery.db               # SQLite database (generated at runtime)
 ├── .cache/                  # Thumbnail cache (generated at runtime)
@@ -48,25 +48,34 @@ gallery/
 │   ├── db/
 │   │   ├── db.go            # Open connection, run migrations
 │   │   ├── migrations/
-│   │   │   └── 001_initial.sql  # Full schema (photos, duplicates, scan_runs, events stub)
+│   │   │   └── 001_initial.sql  # Full schema (photos, duplicates, scan_runs, events, photo_events, faces stub)
 │   │   ├── photos.go        # Photo CRUD + scanPhotoRows helper
 │   │   ├── duplicates.go    # Duplicate path queries
-│   │   ├── queries.go       # Filtered list queries (ListPhotosFiltered with keyword/date, GetGeotaggedPhotos)
+│   │   ├── queries.go       # ListPhotosFiltered, GetGeotaggedPhotos, GetPhotosNearby (bounding-box + Haversine)
+│   │   ├── events.go        # Event + photo_events CRUD (ClearEvents, InsertEvent, GetAllEvents, GetPhotosForEvent, GetEventForPhoto)
+│   │   ├── dedup_report.go  # GetLibraryDedupSummaries, GetCrossPathOverlap, GetSubtreeDedupEntries
 │   │   ├── scan_runs.go     # Scan run queries
 │   │   └── library_paths.go # Library path queries
 │   │
 │   ├── scan/
-│   │   ├── scanner.go       # Directory walk, filter, dispatch; OnProgress callback
+│   │   ├── scanner.go       # Directory walk, filter, dispatch; OnProgress callback; case-insensitive filename filters
+│   │   ├── scanner_filter_test.go  # Unit tests: include/exclude logic, case insensitivity, exclude-beats-include
 │   │   ├── exif.go          # EXIF extraction and camera whitelist validation
 │   │   ├── hash.go          # SHA-256 content hashing
 │   │   └── thumbnail.go     # JPEG thumbnail generation (400px long edge)
 │   │
+│   ├── cluster/
+│   │   └── cluster.go       # Rule-based event clustering (gap days + geo distance); called after every scan
+│   │
 │   ├── api/
 │   │   ├── router.go        # Route registration, Handlers struct, authMiddleware
-│   │   ├── photos.go        # /api/photos list (keyword/date/make/model/gps/flag filters), detail, image, thumbnail
+│   │   ├── photos.go        # /api/photos list + detail (includes event_id, duplicates) + image/thumbnail serve
 │   │   ├── browse.go        # /api/browse and /api/libraries handlers
-│   │   ├── scan.go          # /api/scan trigger + status, ScanManager
+│   │   ├── scan.go          # /api/scan trigger + status, ScanManager (triggers cluster.Run on completion)
+│   │   ├── map.go           # /api/map (all pins), /api/map/nearby?lat&lon&radius_km
 │   │   ├── timeline.go      # /api/timeline — bucket counts by zoom level (decade/year/month/week/day)
+│   │   ├── events.go        # /api/events list, /api/events/{id} detail + photos
+│   │   ├── dedup.go         # /api/dedup/report (library summaries + cross-path overlap), /api/dedup/subtree
 │   │   └── settings.go      # /api/settings get/post, login/logout, issues
 │   │
 │   └── auth/
@@ -75,17 +84,21 @@ gallery/
 └── web/                     # Frontend static assets (embedded into binary)
     ├── index.html           # SPA shell with nav
     ├── css/
-    │   └── app.css          # Dark-theme CSS (custom properties, no Tailwind yet)
+    │   └── app.css          # Dark-theme CSS (custom properties)
     ├── js/
     │   ├── app.js           # Client-side router (History API)
-    │   ├── utils.js         # Shared: api(), formatDate, esc, navigate
+    │   ├── utils.js         # Shared: api(), formatDate, formatCoord, esc, navigate
     │   ├── browse.js        # Folder browser view
-    │   ├── photo.js         # Photo detail view
+    │   ├── photo.js         # Photo detail view (EXIF, duplicates, event link)
     │   ├── search.js        # Search / filter view
     │   ├── timeline.js      # Timeline view (Plotly bar chart)
+    │   ├── map.js           # Geo map view (Leaflet, radius search, circle overlay)
+    │   ├── events.js        # Event list + event detail photo grid
+    │   ├── dedup.js         # Dedup report (per-library summary, cross-path overlap, subtree analyser)
     │   └── settings.js      # Settings / scan management view
     └── vendor/
-        └── plotly.min.js    # Plotly basic bundle (vendored, ~1MB)
+        ├── plotly.min.js    # Plotly basic bundle (vendored, ~1MB)
+        └── leaflet/         # Leaflet 1.9.4 (JS, CSS, marker images)
 ```
 
 ---
@@ -94,11 +107,11 @@ gallery/
 
 ### 3.1 Entry point (`main.go`)
 
-1. Parse CLI flags: `--config` (default `./config.json`), `--port` (default `8080`).
+1. Parse CLI flags: `--config` (default `./config.json`), `--port` (default `8080`), `--scan` (run scan then exit).
 2. Load `config.json`; create with defaults if not present.
 3. Open SQLite connection; run pending migrations.
-4. Register HTTP routes.
-5. Start HTTP server.
+4. In `--scan` mode: run scan pipeline for all library paths, then run `cluster.Run()`, then exit.
+5. In server mode: register HTTP routes and start HTTP server.
 
 ### 3.2 Configuration (`internal/config`)
 
@@ -133,8 +146,10 @@ The scan is designed to be non-blocking relative to the HTTP server — it runs 
 ```
 scanner.go (walk + filter)
     │
-    ├── file passes filters
-    │       │
+    ├── isSupportedExtension (case-insensitive: .jpg .jpeg)
+    │
+    ├── passesFilenameFilters (all patterns compiled with (?i); include then exclude; exclude beats include)
+    │       │ pass
     │       ▼
     │   exif.go → read EXIF → check camera whitelist
     │       │ pass
@@ -146,18 +161,21 @@ scanner.go (walk + filter)
     │   ├── yes → is this filepath the canonical path already in photos?
     │   │         ├── yes (rescan of known file) → skip silently, do NOT touch duplicate_paths
     │   │         └── no  (different path, same hash) → duplicate_paths upsert (ignore if (sha256,filepath) exists)
-    │   └── no  → ingest.go
+    │   └── no  → ingest
     │               ├── exif.go (full field extraction)
     │               ├── thumbnail job → buffered channel
     │               └── db: insert photos row
     │
     └── thumbnail worker pool (N goroutines consuming channel)
-            └── thumbnail.go → decode JPEG/HEIC → resize → write .cache/
+            └── thumbnail.go → decode JPEG → resize → write .cache/<xx>/<sha256>.jpg
+
+After all paths scanned:
+    └── cluster.Run() → clear events → group photos by gap/geo → InsertEvent + InsertPhotoEvent
 ```
 
 **Thumbnail worker pool**: ingest enqueues thumbnail jobs onto a buffered channel. A fixed pool of `ScanWorkers` goroutines consumes the channel. This keeps image decoding/resizing parallel while preventing memory exhaustion.
 
-**HEIC decoding**: `github.com/strukturag/libheif` Go bindings or `github.com/jdeng/goheif` — to be evaluated at implementation time for CGO trade-offs. If CGO is undesirable, thumbnails for HEIC files can be deferred to a separate tool (e.g. `heif-convert` CLI) called via `os/exec`.
+**HEIC support**: deferred — the pure-Go pipeline currently handles JPEG only (`isSupportedExtension` accepts `.jpg`/`.jpeg`). Extension check is case-insensitive.
 
 ### 3.5 Event clustering (`internal/cluster`)
 
@@ -206,24 +224,23 @@ URL patterns match the slugs defined in requirements:
 - `/dedup` → `dedup.js`
 - `/settings` → `settings.js`
 
-Server returns `index.html` for all non-API, non-asset routes (so deep links work on hard refresh).
-
 ### 4.2 Page modules
 
-Each page module exports an `init(params)` function that:
-1. Fetches required data from the API.
-2. Builds DOM (via template literals or simple DOM manipulation — no virtual DOM).
-3. Registers event listeners.
-4. Updates the `<title>` and any nav state.
+Each page module registers a function on `Gallery.pages[name]` that:
+1. Sets active nav highlight via `Gallery.utils.setActiveNav()`.
+2. Renders a loading skeleton into `<main id="app">`.
+3. Fetches required data from the API.
+4. Builds DOM via template literals.
+5. Registers event listeners.
 
-Shared utilities (API fetch wrapper with error handling, thumbnail lazy loading, date formatting) live in `js/utils.js`.
+Shared utilities live in `utils.js`: `api()` (fetch wrapper with 401 redirect), `formatDate()`, `formatCoord()`, `esc()` (HTML entity escape), `navigate()` (History API pushState + dispatch).
 
 ### 4.3 Map view (`map.js`)
 
-- Leaflet.js initialised with OpenStreetMap tiles (configurable tile URL in config, defaulting to OSM).
-- `MarkerCluster` plugin for cluster rendering.
-- On radius search: user clicks map → Leaflet `L.circle` rendered → radius input shown → on confirm, navigate to `/map?lat=...&lon=...&radius=...` which triggers an API call to `/api/map/photos?lat=...&lon=...&radius=...`.
-- Haversine filtering is done server-side in SQL using a bounding-box pre-filter (fast index scan) followed by exact distance calculation in Go.
+- Leaflet 1.9.4 (vendored) initialised with OpenStreetMap tiles.
+- On page load: fetches `/api/map` and renders all geotagged photos as circle markers.
+- Radius search: user clicks map to set a centre → `L.circle` overlay rendered → confirm fetches `/api/map/nearby?lat=…&lon=…&radius_km=…` → results grid below map.
+- Haversine filtering is done server-side: bounding-box pre-filter in SQL (uses latitude/longitude indexes) followed by exact great-circle distance check in Go.
 
 ### 4.4 Timeline view (`timeline.js`)
 
@@ -236,6 +253,18 @@ Shared utilities (API fetch wrapper with error handling, thumbnail lazy loading,
 - Lists library paths with last-scan status and a per-path "Rescan" button.
 - Rescan triggers `POST /api/scan` with the path ID; polls `GET /api/scan/status` every 2 seconds to show progress (files found / ingested / duplicate / error counts from `scan_runs`).
 - Camera whitelist and filename filter editors with inline validation (regex patterns are tested client-side before saving).
+
+### 4.6 Events view (`events.js`)
+
+- List page: cards showing label (e.g. "14–18 Aug 2019"), photo count, date range, GPS centroid.
+- Detail page: photo grid for the event; navigates to `/photo/:sha256` on click.
+- Events are computed server-side by `cluster.Run()` and stored in `events` / `photo_events` tables.
+
+### 4.7 Dedup view (`dedup.js`)
+
+- Per-library summary table: total / unique / photos with duplicates elsewhere.
+- Cross-library overlap table: shared hash count between every pair of library paths.
+- Subtree analyser: enter a directory prefix, get per-file unique/dupe status with other-path list.
 
 ---
 
@@ -292,10 +321,10 @@ CMD ["./gallery", "--config", "/data/config.json"]
 | `github.com/rwcarlsen/goexif/exif` | EXIF extraction from JPEG |
 | `golang.org/x/image` | Image decoding/resizing for thumbnails |
 | `golang.org/x/crypto/bcrypt` | Password hashing |
-| `github.com/jdeng/goheif` (future) | HEIC decoding — deferred to a later phase |
 | Plotly.js (vendored, basic bundle) | Timeline bar chart |
+| Leaflet 1.9.4 (vendored) | Interactive geo map |
 
-There is no npm build step. JS libraries (Leaflet, Plotly, Tailwind) will be added to `web/vendor/` as needed in later phases.
+HEIC support is deferred. There is no npm build step.
 
 ---
 
@@ -326,11 +355,20 @@ There is no npm build step. JS libraries (Leaflet, Plotly, Tailwind) will be add
 - Frontend: `search.js` (filter form + paginated grid), `timeline.js` (Plotly bar chart + click-to-grid).
 - Plotly basic bundle vendored at `web/vendor/plotly.min.js`.
 
-### Phase 4 — Geo view
-- Map view with Leaflet, radius search, server-side geo filtering.
+### Phase 4 — Geo view ✅
+- Leaflet 1.9.4 vendored; interactive map with all geotagged photos as markers.
+- `/api/map` (all pins) and `/api/map/nearby?lat&lon&radius_km` (bounding-box SQL + Go-side Haversine).
+- Radius search UX: click map → circle overlay → confirm → filtered results grid.
 
-### Phase 5 — Events and dedup
-- Rule-based event clustering, event browsing, dedup report.
+### Phase 5 — Events and dedup ✅
+- `internal/cluster`: rule-based clustering (gap days + geo distance); runs after every scan.
+- `internal/db/events.go`: `events` + `photo_events` CRUD.
+- `internal/db/dedup_report.go`: per-library summary, cross-path overlap, subtree analysis.
+- API: `/api/events`, `/api/events/{id}`, `/api/dedup/report`, `/api/dedup/subtree`.
+- Photo detail API now includes `event_id`.
+- Frontend: `events.js` (event list cards + detail grid), `dedup.js` (summary tables + subtree analyser).
+- `samples/duplicates/` added for dedup testing; clean scan: found:7 ingested:5 duplicate:2 → 4 events.
+- Filename filters: case-insensitive (`(?i)` wrap), exclude-beats-include, multiple patterns per list. Unit tests in `scanner_filter_test.go`.
 
 ### Phase 6 — Settings UI enhancements
 - Inline config editing (camera whitelist, filename filters), ingest issues panel.

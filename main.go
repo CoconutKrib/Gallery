@@ -10,6 +10,7 @@ import (
 	"os"
 
 	"github.com/halleck/gallery/internal/api"
+	"github.com/halleck/gallery/internal/cluster"
 	"github.com/halleck/gallery/internal/config"
 	"github.com/halleck/gallery/internal/db"
 	"github.com/halleck/gallery/internal/scan"
@@ -61,6 +62,13 @@ func main() {
 			}
 			log.Printf("[scan] %q done — found:%d skipped:%d ingested:%d duplicate:%d errors:%d",
 				lp.Path, stats.Found, stats.Skipped, stats.Ingested, stats.Duplicate, stats.Errors)
+		}
+		// Re-cluster after scan.
+		log.Printf("[cluster] running event clustering")
+		if err := cluster.Run(database, cfg.EventGapDays, cfg.EventGeoKm); err != nil {
+			log.Printf("[cluster] error: %v", err)
+		} else {
+			log.Printf("[cluster] done")
 		}
 		return
 	}

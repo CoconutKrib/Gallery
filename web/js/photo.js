@@ -73,6 +73,18 @@ Gallery.pages.photo = async function(sha256) {
     dupesHtml = `<p style="color:var(--muted);font-size:13px">No duplicates found.</p>`;
   }
 
+  // Event membership.
+  let eventHtml = '';
+  if (photo.event_id != null) {
+    eventHtml = `<div class="meta-card" style="margin-bottom:var(--gap)">
+      <h3>Event</h3>
+      <a href="/events/${e(photo.event_id)}" class="back-link" style="margin-bottom:0"
+         onclick="Gallery.utils.navigate('/events/${e(photo.event_id)}');return false;">
+        View event →
+      </a>
+    </div>`;
+  }
+
   app.innerHTML = `<div class="photo-detail">
     ${back}
     ${img}
@@ -87,6 +99,7 @@ Gallery.pages.photo = async function(sha256) {
           <h3>File</h3>
           <table class="exif-table"><tbody>${fileRows}</tbody></table>
         </div>
+        ${eventHtml}
         <div class="meta-card">
           <h3>Duplicate locations</h3>
           ${dupesHtml}
