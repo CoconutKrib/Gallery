@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"math"
 	"strings"
 	"time"
 )
@@ -172,4 +173,51 @@ func GetGeotaggedPhotos(db *sql.DB) ([]Photo, error) {
 		photos = append(photos, *p)
 	}
 	return photos, rows.Err()
+}
+
+// haversineKm returns the great-circle distance in kilometres between two lat/lon points.
+func haversineKm(lat1, lon1, lat2, lon2 float64) float64 {
+	const R = 6371.0
+	dLat := (lat2 - lat1) * math.Pi / 180
+	dLon := (lon2 - lon1) * math.Pi / 180
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
+		math.Cos(lat1*math.Pi/180)*math.Cos(lat2*math.Pi/180)*
+			math.Sin(dLon/2)*math.Sin(dLon/2)
+	return R * 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+}
+
+// GetPhotosNearby returns all geotagged photos within radiusKm of (lat, lon).
+// A bounding-box pre-filter is applied in SQL; precise Haversine filtering is done in Go.
+func GetPhotosNearby(db *sql.DB, lat, lon, radiusKm float64) ([]Photo, error) {
+	// 1 degree latitude ≈ 111 km; longitude degree shrinks with cos(lat).
+	latDelta := radiusKm / 111.0
+	lonDelta := radiusKm / (111.0 * math.Cos(lat*math.Pi/180))
+
+	rows, err := db.Query(
+		"SELECT "+photoSelectCols+" FROM photos WHERE latitude IS NOT NULL AND longitude IS NOT NULL"+
+			" AND latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?",
+		lat-latDelta, lat+latDelta, lon-lonDelta, lon+lonDelta,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var photos []Photo
+	for rows.Next() {
+		p, err := scanPhotoRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		if haversineKm(lat, lon, *p.Latitude, *p.Longitude) <= radiusKm {
+			photos = append(photos, *p)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if photos == nil {
+		photos = []Photo{}
+	}
+	return photos, nil
 }

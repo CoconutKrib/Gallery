@@ -18,6 +18,9 @@ gallery
 test_gallery.db
 .test_cache/
 
+# User config (contains local paths / secrets)
+config.json
+
 # IDE and editor
 .vscode/
 .idea/

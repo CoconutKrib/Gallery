@@ -88,7 +88,7 @@ web/
 - ✅ **Phase 1** — Ingest pipeline (scan, EXIF, hash, dedup, thumbnails). Verified with 5 sample photos.
 - ✅ **Phase 2** — HTTP server, auth, browse API, photo detail API, scan manager, settings API, frontend SPA.
 - ✅ **Phase 3** — Search/filter view, timeline view (Plotly), `/api/timeline` endpoint.
-- ⬜ **Phase 4** — Geo/map view (Leaflet, radius search, server-side Haversine).
+- ✅ **Phase 4** — Geo/map view (Leaflet, radius search, server-side Haversine).
 - ⬜ **Phase 5** — Event clustering (rule-based, `internal/cluster`), event browsing, dedup report.
 - ⬜ **Phase 6** — Settings UI enhancements (inline editing of whitelist/filters, issues panel).
 

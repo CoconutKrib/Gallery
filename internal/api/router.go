@@ -58,6 +58,8 @@ func (h *Handlers) RegisterRoutes(mux *http.ServeMux, staticFS http.FileSystem) 
 	api("POST", "/api/settings", h.handlePostSettings)
 	api("GET", "/api/issues", h.handleIssues)
 	api("GET", "/api/timeline", h.handleTimeline)
+	api("GET", "/api/map", h.handleMapPhotos)
+	api("GET", "/api/map/nearby", h.handleMapNearby)
 
 	// Static assets.
 	static := http.FileServer(staticFS)

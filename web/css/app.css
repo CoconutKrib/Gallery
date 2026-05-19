@@ -532,3 +532,113 @@ a:hover { color: var(--accent-h); }
   font-size: 14px;
 }
 
+/* ── Map view ── */
+.map-layout {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - var(--nav-h));
+}
+
+.map-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+  padding: 8px var(--gap);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.map-count {
+  font-size: 13px;
+  color: var(--muted);
+  min-width: 80px;
+}
+
+.map-search-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.map-label {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.map-input {
+  width: 80px;
+  padding: 4px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 13px;
+}
+.map-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.map-unit {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.btn {
+  padding: 5px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+.btn:hover { background: rgba(255,255,255,0.07); border-color: var(--muted); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.btn-primary:hover:not(:disabled) { background: var(--accent-h); border-color: var(--accent-h); }
+.btn.btn-active { background: rgba(79,142,247,0.2); border-color: var(--accent); color: var(--accent); }
+
+.map-container {
+  flex: 1;
+  min-height: 0;
+}
+
+/* Leaflet tile layer is lighter on dark background — use CSS invert trick */
+.map-container .leaflet-tile-pane {
+  filter: brightness(0.85) saturate(0.9);
+}
+
+/* Map popup */
+.map-popup {
+  font-size: 13px;
+  color: #111;
+}
+.map-thumb {
+  width: 160px;
+  height: 120px;
+  object-fit: cover;
+  border-radius: 4px;
+  display: block;
+  margin-bottom: 6px;
+}
+.map-popup-name {
+  font-weight: 500;
+  word-break: break-all;
+  margin-bottom: 2px;
+}
+.map-popup-date {
+  color: #555;
+  font-size: 12px;
+}
+.map-popup-coords {
+  color: #888;
+  font-size: 11px;
+  margin-top: 2px;
+}
+

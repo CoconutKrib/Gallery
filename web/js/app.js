@@ -10,6 +10,7 @@ Gallery.router = (() => {
     { pattern: /^\/photo\/([0-9a-f]{64})$/, page: 'photo' },
     { pattern: /^\/search$/, page: 'search' },
     { pattern: /^\/timeline$/, page: 'timeline' },
+    { pattern: /^\/map$/, page: 'map' },
     { pattern: /^\/settings$/, page: 'settings' },
     { pattern: /^\/$/, page: 'home' },
   ];
