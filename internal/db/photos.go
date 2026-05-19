@@ -47,6 +47,11 @@ func InsertPhoto(db *sql.DB, p *Photo) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("marshalling flags: %w", err)
 	}
+	// Store captured_at as UTC RFC3339 so SQLite's strftime() can parse it.
+	var capturedAt any
+	if p.CapturedAt != nil {
+		capturedAt = p.CapturedAt.UTC().Format(time.RFC3339)
+	}
 	res, err := db.Exec(`
 		INSERT INTO photos (
 			sha256, filepath, library_path_id, filename,
@@ -56,7 +61,7 @@ func InsertPhoto(db *sql.DB, p *Photo) (int64, error) {
 			width, height, orientation, thumbnail_path, flags
 		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.SHA256, p.Filepath, p.LibraryPathID, p.Filename,
-		p.CapturedAt, p.Latitude, p.Longitude, p.Altitude,
+		capturedAt, p.Latitude, p.Longitude, p.Altitude,
 		p.CameraMake, p.CameraModel, p.CameraSerial, p.LensModel,
 		p.ISO, p.Aperture, p.ShutterSpeed, p.FocalLength, p.Flash,
 		p.Width, p.Height, p.Orientation, p.ThumbnailPath, string(flagsJSON),

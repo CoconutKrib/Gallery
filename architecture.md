@@ -51,7 +51,7 @@ gallery/
 │   │   │   └── 001_initial.sql  # Full schema (photos, duplicates, scan_runs, events stub)
 │   │   ├── photos.go        # Photo CRUD + scanPhotoRows helper
 │   │   ├── duplicates.go    # Duplicate path queries
-│   │   ├── queries.go       # Filtered list queries (ListPhotosFiltered, GetPhotosByFilepathPrefix, GetGeotaggedPhotos)
+│   │   ├── queries.go       # Filtered list queries (ListPhotosFiltered with keyword/date, GetGeotaggedPhotos)
 │   │   ├── scan_runs.go     # Scan run queries
 │   │   └── library_paths.go # Library path queries
 │   │
@@ -63,9 +63,10 @@ gallery/
 │   │
 │   ├── api/
 │   │   ├── router.go        # Route registration, Handlers struct, authMiddleware
-│   │   ├── photos.go        # /api/photos list, detail, image, thumbnail handlers
+│   │   ├── photos.go        # /api/photos list (keyword/date/make/model/gps/flag filters), detail, image, thumbnail
 │   │   ├── browse.go        # /api/browse and /api/libraries handlers
 │   │   ├── scan.go          # /api/scan trigger + status, ScanManager
+│   │   ├── timeline.go      # /api/timeline — bucket counts by zoom level (decade/year/month/week/day)
 │   │   └── settings.go      # /api/settings get/post, login/logout, issues
 │   │
 │   └── auth/
@@ -75,12 +76,16 @@ gallery/
     ├── index.html           # SPA shell with nav
     ├── css/
     │   └── app.css          # Dark-theme CSS (custom properties, no Tailwind yet)
-    └── js/
-        ├── app.js           # Client-side router (History API)
-        ├── utils.js         # Shared: api(), formatDate, esc, navigate
-        ├── browse.js        # Folder browser view
-        ├── photo.js         # Photo detail view
-        └── settings.js      # Settings / scan management view
+    ├── js/
+    │   ├── app.js           # Client-side router (History API)
+    │   ├── utils.js         # Shared: api(), formatDate, esc, navigate
+    │   ├── browse.js        # Folder browser view
+    │   ├── photo.js         # Photo detail view
+    │   ├── search.js        # Search / filter view
+    │   ├── timeline.js      # Timeline view (Plotly bar chart)
+    │   └── settings.js      # Settings / scan management view
+    └── vendor/
+        └── plotly.min.js    # Plotly basic bundle (vendored, ~1MB)
 ```
 
 ---
@@ -288,6 +293,7 @@ CMD ["./gallery", "--config", "/data/config.json"]
 | `golang.org/x/image` | Image decoding/resizing for thumbnails |
 | `golang.org/x/crypto/bcrypt` | Password hashing |
 | `github.com/jdeng/goheif` (future) | HEIC decoding — deferred to a later phase |
+| Plotly.js (vendored, basic bundle) | Timeline bar chart |
 
 There is no npm build step. JS libraries (Leaflet, Plotly, Tailwind) will be added to `web/vendor/` as needed in later phases.
 
@@ -313,8 +319,12 @@ There is no npm build step. JS libraries (Leaflet, Plotly, Tailwind) will be add
 - Folder browser, photo detail view, static asset serving, scan trigger/status, basic auth, settings view.
 - All API endpoints and frontend pages verified working.
 
-### Phase 3 — Search and timeline
-- Search/filter API and view, timeline view with Plotly.
+### Phase 3 — Search and timeline ✅
+- Search/filter API: keyword, date range, make/model, GPS, flag filters wired into `/api/photos`.
+- Timeline API: `/api/timeline?zoom=year|month|week|day|decade` returns bucket counts.
+- `captured_at` stored as UTC RFC3339 so SQLite `strftime()` can group by time period.
+- Frontend: `search.js` (filter form + paginated grid), `timeline.js` (Plotly bar chart + click-to-grid).
+- Plotly basic bundle vendored at `web/vendor/plotly.min.js`.
 
 ### Phase 4 — Geo view
 - Map view with Leaflet, radius search, server-side geo filtering.

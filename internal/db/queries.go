@@ -15,6 +15,7 @@ type PhotoFilter struct {
 	CameraModel    string
 	HasGPS         *bool
 	Flag           string
+	Keyword        string // matched against filepath and filename (case-insensitive LIKE)
 	FilepathPrefix string // return only photos whose filepath starts with this + "/"
 	Page           int    // 1-based; 0 treated as 1
 	PerPage        int    // 0 treated as 50; max 500
@@ -70,6 +71,11 @@ func ListPhotosFiltered(db *sql.DB, f PhotoFilter) ([]Photo, int, error) {
 	if f.Flag != "" {
 		clauses = append(clauses, `flags LIKE ?`)
 		args = append(args, `%"`+f.Flag+`"%`)
+	}
+	if f.Keyword != "" {
+		clauses = append(clauses, "(LOWER(filepath) LIKE LOWER(?) OR LOWER(filename) LIKE LOWER(?))")
+		like := "%" + strings.ReplaceAll(f.Keyword, "%", "\\%") + "%"
+		args = append(args, like, like)
 	}
 
 	where := ""

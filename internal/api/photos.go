@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/halleck/gallery/internal/db"
 )
@@ -16,12 +17,24 @@ func (h *Handlers) handlePhotos(w http.ResponseWriter, r *http.Request) {
 		CameraModel: r.URL.Query().Get("model"),
 		Flag:        r.URL.Query().Get("flag"),
 		OrderBy:     r.URL.Query().Get("order"),
+		Keyword:     r.URL.Query().Get("q"),
 	}
 
 	if v := r.URL.Query().Get("library_id"); v != "" {
 		id, err := strconv.ParseInt(v, 10, 64)
 		if err == nil {
 			f.LibraryPathID = &id
+		}
+	}
+	if v := r.URL.Query().Get("from"); v != "" {
+		if t, err := time.Parse("2006-01-02", v); err == nil {
+			f.From = &t
+		}
+	}
+	if v := r.URL.Query().Get("to"); v != "" {
+		if t, err := time.Parse("2006-01-02", v); err == nil {
+			end := t.Add(24*time.Hour - time.Nanosecond)
+			f.To = &end
 		}
 	}
 	if v := r.URL.Query().Get("has_gps"); v == "true" {

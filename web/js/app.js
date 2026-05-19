@@ -8,6 +8,8 @@ Gallery.router = (() => {
   const routes = [
     { pattern: /^\/browse(?:\/(\d+))?(?:\/(.*))?$/, page: 'browse' },
     { pattern: /^\/photo\/([0-9a-f]{64})$/, page: 'photo' },
+    { pattern: /^\/search$/, page: 'search' },
+    { pattern: /^\/timeline$/, page: 'timeline' },
     { pattern: /^\/settings$/, page: 'settings' },
     { pattern: /^\/$/, page: 'home' },
   ];

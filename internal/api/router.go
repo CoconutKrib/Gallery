@@ -57,11 +57,13 @@ func (h *Handlers) RegisterRoutes(mux *http.ServeMux, staticFS http.FileSystem) 
 	api("GET", "/api/settings", h.handleGetSettings)
 	api("POST", "/api/settings", h.handlePostSettings)
 	api("GET", "/api/issues", h.handleIssues)
+	api("GET", "/api/timeline", h.handleTimeline)
 
 	// Static assets.
 	static := http.FileServer(staticFS)
 	mux.HandleFunc("GET /css/", h.authMiddleware(static.ServeHTTP))
 	mux.HandleFunc("GET /js/", h.authMiddleware(static.ServeHTTP))
+	mux.HandleFunc("GET /vendor/", h.authMiddleware(static.ServeHTTP))
 
 	// SPA fallback: all other GET requests get index.html.
 	mux.HandleFunc("GET /", h.authMiddleware(func(w http.ResponseWriter, r *http.Request) {

@@ -353,3 +353,182 @@ a:hover { color: var(--accent-h); }
   letter-spacing: 0.5px;
   margin-bottom: 12px;
 }
+
+/* ── Search page ── */
+.search-page {
+  padding: var(--gap);
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.search-filters {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--gap);
+  margin-bottom: var(--gap);
+}
+.filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+}
+.filter-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 120px;
+}
+.filter-field--wide { min-width: 220px; flex: 1; }
+.filter-field--action { min-width: 80px; }
+.filter-field label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.filter-field input,
+.filter-field select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 6px 10px;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.1s;
+}
+.filter-field input:focus,
+.filter-field select:focus {
+  border-color: var(--accent);
+}
+.filter-field input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.6);
+}
+.btn-primary {
+  padding: 7px 16px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: background 0.1s;
+  white-space: nowrap;
+}
+.btn-primary:hover { background: var(--accent-h); }
+.search-results { }
+.result-count {
+  display: block;
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+.pagination button {
+  padding: 5px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.1s;
+}
+.pagination button:hover:not(:disabled) { background: rgba(255,255,255,0.06); }
+.pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── Timeline page ── */
+.timeline-page {
+  padding: var(--gap);
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.timeline-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: var(--gap);
+}
+.timeline-header h1 {
+  font-size: 20px;
+  font-weight: 700;
+  margin-right: 8px;
+}
+.zoom-controls {
+  display: flex;
+  gap: 4px;
+}
+.zoom-btn {
+  padding: 5px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: capitalize;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.zoom-btn:hover { color: var(--text); background: rgba(255,255,255,0.06); }
+.zoom-btn.active {
+  background: rgba(79,142,247,0.15);
+  color: var(--accent);
+  border-color: rgba(79,142,247,0.4);
+}
+.timeline-range {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.timeline-range label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.timeline-range input[type="date"] {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 5px 8px;
+  font-size: 13px;
+  outline: none;
+}
+.timeline-range input[type="date"]:focus { border-color: var(--accent); }
+.timeline-range input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.6); }
+.timeline-chart {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  height: 280px;
+  margin-bottom: var(--gap);
+}
+.timeline-chart .js-plotly-plot,
+.timeline-chart .plot-container {
+  height: 100%;
+}
+.timeline-info {
+  margin-bottom: 12px;
+}
+.timeline-grid-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  font-size: 14px;
+}
+
