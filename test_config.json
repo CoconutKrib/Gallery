@@ -1,0 +1,41 @@
+{
+  "library_paths": [
+    {
+      "path": "/home/halleck/gallery/samples",
+      "label": "samples"
+    }
+  ],
+  "camera_whitelist": [
+    {
+      "make": "HTC",
+      "model": "HTC One"
+    },
+    {
+      "make": "Canon",
+      "model": "Canon EOS 700D"
+    },
+    {
+      "make": "Apple",
+      "model": "iPhone SE"
+    },
+    {
+      "make": "Samsung Techwin",
+      "model": ""
+    }
+  ],
+  "filename_filters": {
+    "include": [],
+    "exclude": []
+  },
+  "auth": {
+    "enabled": false,
+    "password_hash": "",
+    "session_secret": "0f2a7dd47129c1f4e14d1c00c2104056ad84a5a981c9b2860e098e330b4d6196"
+  },
+  "db_path": "./test_gallery.db",
+  "cache_dir": "./.test_cache",
+  "scan_workers": 2,
+  "event_gap_days": 2,
+  "event_geo_km": 500,
+  "session_ttl_hours": 24
+}
