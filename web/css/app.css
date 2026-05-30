@@ -331,6 +331,141 @@ a:hover { color: var(--accent-h); }
   margin-top: 4px;
 }
 
+/* ── Settings inline editing ── */
+.settings-hint {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+  margin-left: 8px;
+}
+.settings-add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+.settings-save-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.settings-input {
+  flex: 1;
+  min-width: 140px;
+  max-width: 280px;
+  padding: 5px 9px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 13px;
+}
+.settings-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.settings-add-btn {
+  padding: 5px 12px;
+  border-radius: var(--radius);
+  background: rgba(79,142,247,0.15);
+  color: var(--accent);
+  border: 1px solid rgba(79,142,247,0.3);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: background 0.1s;
+  white-space: nowrap;
+}
+.settings-add-btn:hover { background: rgba(79,142,247,0.25); }
+.settings-del-btn {
+  padding: 2px 7px;
+  border-radius: var(--radius);
+  background: rgba(224,85,85,0.1);
+  color: var(--danger);
+  border: 1px solid rgba(224,85,85,0.25);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1.4;
+  margin-left: auto;
+  transition: background 0.1s;
+}
+.settings-del-btn:hover { background: rgba(224,85,85,0.2); }
+.settings-err {
+  font-size: 12px;
+  color: var(--danger);
+}
+.settings-toggle-btn {
+  padding: 2px 10px;
+  border-radius: var(--radius);
+  background: rgba(139,144,153,0.12);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  margin-left: 10px;
+  transition: background 0.1s, color 0.1s;
+}
+.settings-toggle-btn:hover { background: rgba(139,144,153,0.22); color: var(--text); }
+.filter-list-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-bottom: 4px;
+}
+.filter-pattern {
+  flex: 1;
+  font-family: monospace;
+  font-size: 12px;
+  color: var(--accent);
+  background: rgba(79,142,247,0.07);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* ── Issues panel ── */
+.issues-count {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.issue-row {
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.issue-filename {
+  font-weight: 600;
+  font-size: 13px;
+  display: block;
+}
+.issue-meta {
+  font-size: 12px;
+  color: var(--muted);
+  display: block;
+  margin-top: 2px;
+}
+.issue-flags {
+  margin-top: 4px;
+}
+.issue-path {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 4px;
+  word-break: break-all;
+}
+.pill-warn {
+  background: rgba(224,85,85,0.12);
+  color: var(--danger);
+}
+
 /* ── Utility ── */
 .pill {
   display: inline-block;
