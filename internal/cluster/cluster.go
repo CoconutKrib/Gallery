@@ -11,7 +11,7 @@ package cluster
 import (
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"time"
 
@@ -57,7 +57,7 @@ func Run(database *sql.DB, gapDays int, geoKm float64) error {
 	rows.Close()
 
 	if len(points) == 0 {
-		log.Printf("[cluster] no datable photos found; skipping")
+		slog.Info("cluster: no datable photos, skipping")
 		return nil
 	}
 
@@ -98,7 +98,7 @@ func Run(database *sql.DB, gapDays int, geoKm float64) error {
 	}
 	groups = append(groups, current)
 
-	log.Printf("[cluster] formed %d events from %d photos", len(groups), len(points))
+	slog.Info("cluster: formed events", "event_count", len(groups), "photo_count", len(points))
 
 	// Persist events.
 	for _, g := range groups {

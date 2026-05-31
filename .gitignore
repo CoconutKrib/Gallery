@@ -1,6 +1,9 @@
 #samples
 samples/
 
+#logs
+gallery.log
+
 # Binaries
 gallery
 *.exe

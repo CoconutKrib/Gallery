@@ -37,6 +37,8 @@ type Config struct {
 	Auth            AuthConfig      `json:"auth"`
 	DBPath          string          `json:"db_path"`
 	CacheDir        string          `json:"cache_dir"`
+	LogFile         string          `json:"log_file"`
+	LogLevel        string          `json:"log_level"`
 	ScanWorkers     int             `json:"scan_workers"`
 	EventGapDays    int             `json:"event_gap_days"`
 	EventGeoKm      float64         `json:"event_geo_km"`
@@ -56,6 +58,8 @@ func defaults() Config {
 		},
 		DBPath:          "./gallery.db",
 		CacheDir:        "./.cache",
+		LogFile:         "",
+		LogLevel:        "info",
 		ScanWorkers:     4,
 		EventGapDays:    2,
 		EventGeoKm:      500,

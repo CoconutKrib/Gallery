@@ -44,6 +44,13 @@ go run . --config test_config.json --scan
 - **Security**: all file serving validates paths are within configured library roots or cache dir (`pathIsWithinRoots`). Never serve arbitrary filesystem paths.
 - **Auth middleware** — no-op when `auth.enabled = false`. API routes 401, page routes redirect to `/login`.
 - **Filename filters are case-insensitive** — all include/exclude regex patterns are automatically wrapped with `(?i)` at compile time (`caseInsensitivePattern()` in `scanner.go`). Exclude beats include: if both lists are configured, a file must pass include first, then not match any exclude.
+- **Logging — always use `log/slog`, never `log.Printf`**. The global default logger is initialised by `logging.Setup()` in `main.go` (writes to stderr + optional `log_file`). Use structured key-value attributes, not `%v` format strings:
+  ```go
+  slog.Info("scan: done", "path", lp.Path, "found", stats.Found, "errors", stats.Errors)
+  slog.Warn("thumbnail error", "path", job.SourcePath, "err", err)
+  slog.Error("scan insert error", "path", path, "err", insertErr)
+  ```
+  Level guide: `Info` for normal milestones, `Warn` for recoverable problems (single file failures), `Error` for failures that affect correctness. `Debug` for verbose detail useful only when diagnosing. All HTTP requests are logged automatically by `logging.HTTPMiddleware` — do not log them manually in handlers. Never import `"log"` in new files; always import `"log/slog"`.
 
 ## Project structure
 

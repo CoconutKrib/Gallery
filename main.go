@@ -5,7 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 
@@ -13,6 +13,7 @@ import (
 	"github.com/halleck/gallery/internal/cluster"
 	"github.com/halleck/gallery/internal/config"
 	"github.com/halleck/gallery/internal/db"
+	"github.com/halleck/gallery/internal/logging"
 	"github.com/halleck/gallery/internal/scan"
 )
 
@@ -27,48 +28,62 @@ func main() {
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
-		log.Fatalf("loading config: %v", err)
+		slog.Error("loading config", "err", err)
+		os.Exit(1)
 	}
+
+	cleanupLog, err := logging.Setup(cfg.LogFile, cfg.LogLevel)
+	if err != nil {
+		slog.Error("setting up logging", "err", err)
+		os.Exit(1)
+	}
+	defer cleanupLog()
 
 	database, err := db.Open(cfg.DBPath)
 	if err != nil {
-		log.Fatalf("opening database: %v", err)
+		slog.Error("opening database", "err", err)
+		os.Exit(1)
 	}
 	defer database.Close()
 
 	if err := os.MkdirAll(cfg.CacheDir, 0o755); err != nil {
-		log.Fatalf("creating cache dir: %v", err)
+		slog.Error("creating cache dir", "err", err)
+		os.Exit(1)
 	}
 
 	if *doScan {
 		if len(cfg.LibraryPaths) == 0 {
-			log.Fatal("no library_paths configured in config.json")
+			slog.Error("no library_paths configured in config.json")
+			os.Exit(1)
 		}
 		for _, lp := range cfg.LibraryPaths {
 			lpID, err := db.UpsertLibraryPath(database, lp.Path, lp.Label)
 			if err != nil {
-				log.Printf("[scan] upsert library path %q: %v", lp.Path, err)
+				slog.Error("scan: upsert library path failed", "path", lp.Path, "err", err)
 				continue
 			}
 			scanner, err := scan.NewScanner(cfg, database, lpID)
 			if err != nil {
-				log.Printf("[scan] creating scanner for %q: %v", lp.Path, err)
+				slog.Error("scan: creating scanner failed", "path", lp.Path, "err", err)
 				continue
 			}
-			log.Printf("[scan] starting scan of %q (%s)", lp.Path, lp.Label)
+			slog.Info("scan: starting", "path", lp.Path, "label", lp.Label)
 			stats, err := scanner.Run(lp.Path)
 			if err != nil {
-				log.Printf("[scan] scan of %q failed: %v", lp.Path, err)
+				slog.Error("scan: failed", "path", lp.Path, "err", err)
 			}
-			log.Printf("[scan] %q done — found:%d skipped:%d ingested:%d duplicate:%d errors:%d",
-				lp.Path, stats.Found, stats.Skipped, stats.Ingested, stats.Duplicate, stats.Errors)
+			slog.Info("scan: done",
+				"path", lp.Path,
+				"found", stats.Found, "skipped", stats.Skipped,
+				"ingested", stats.Ingested, "duplicate", stats.Duplicate,
+				"errors", stats.Errors)
 		}
 		// Re-cluster after scan.
-		log.Printf("[cluster] running event clustering")
+		slog.Info("cluster: running event clustering")
 		if err := cluster.Run(database, cfg.EventGapDays, cfg.EventGeoKm); err != nil {
-			log.Printf("[cluster] error: %v", err)
+			slog.Error("cluster: failed", "err", err)
 		} else {
-			log.Printf("[cluster] done")
+			slog.Info("cluster: done")
 		}
 		return
 	}
@@ -76,12 +91,16 @@ func main() {
 	// HTTP server.
 	sub, err := fs.Sub(webFS, "web")
 	if err != nil {
-		log.Fatalf("embedding web assets: %v", err)
+		slog.Error("embedding web assets", "err", err)
+		os.Exit(1)
 	}
 	handlers := api.NewHandlers(database, cfg, *cfgPath)
 	mux := http.NewServeMux()
 	handlers.RegisterRoutes(mux, http.FS(sub))
 	addr := fmt.Sprintf(":%d", *port)
-	log.Printf("Gallery listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	slog.Info("Gallery listening", "addr", addr)
+	if err := http.ListenAndServe(addr, logging.HTTPMiddleware(mux)); err != nil {
+		slog.Error("server error", "err", err)
+		os.Exit(1)
+	}
 }

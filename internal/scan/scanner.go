@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io/fs"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -90,11 +90,11 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 				job.ResultPath = path
 				job.Err = err
 				if err != nil {
-					log.Printf("[thumbnail] error for %s: %v", job.SourcePath, err)
+					slog.Warn("thumbnail error", "path", job.SourcePath, "err", err)
 					continue
 				}
 				if updateErr := gdb.UpdateThumbnailPath(s.db, job.SHA256, path); updateErr != nil {
-					log.Printf("[thumbnail] db update error for %s: %v", job.SHA256, updateErr)
+					slog.Warn("thumbnail db update error", "sha256", job.SHA256, "err", updateErr)
 				}
 			}
 		}()
@@ -103,7 +103,7 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 	var stats Stats
 	walkErr := filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			log.Printf("[scan] walk error at %s: %v", path, err)
+			slog.Warn("scan walk error", "path", path, "err", err)
 			stats.Errors++
 			return nil // continue walking
 		}
@@ -124,7 +124,7 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 
 		exifData, err := ReadEXIF(path)
 		if err != nil {
-			log.Printf("[scan] exif error for %s: %v", path, err)
+			slog.Warn("scan exif error", "path", path, "err", err)
 			stats.Errors++
 			s.progress(stats)
 			return nil
@@ -138,7 +138,7 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 
 		hash, err := HashFile(path)
 		if err != nil {
-			log.Printf("[scan] hash error for %s: %v", path, err)
+			slog.Warn("scan hash error", "path", path, "err", err)
 			stats.Errors++
 			s.progress(stats)
 			return nil
@@ -146,7 +146,7 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 
 		exists, err := gdb.PhotoExistsByHash(s.db, hash)
 		if err != nil {
-			log.Printf("[scan] db lookup error for %s: %v", path, err)
+			slog.Warn("scan db lookup error", "path", path, "err", err)
 			stats.Errors++
 			s.progress(stats)
 			return nil
@@ -165,7 +165,7 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 			// Attempt to record it (idempotent: INSERT OR IGNORE handles rescans).
 			isNewDupe, insertErr := recordDuplicateIfNew(s.db, hash, path, s.libraryPathID)
 			if insertErr != nil {
-				log.Printf("[scan] duplicate record error for %s: %v", path, insertErr)
+				slog.Warn("scan duplicate record error", "path", path, "err", insertErr)
 			}
 			if isNewDupe {
 				stats.Duplicate++
@@ -180,7 +180,7 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 		// New photo — ingest.
 		photo := buildPhotoRecord(exifData, hash, path, d.Name(), s.libraryPathID)
 		if _, insertErr := gdb.InsertPhoto(s.db, photo); insertErr != nil {
-			log.Printf("[scan] insert error for %s: %v", path, insertErr)
+			slog.Error("scan insert error", "path", path, "err", insertErr)
 			stats.Errors++
 			return nil
 		}
@@ -203,11 +203,11 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 	finishErr := gdb.FinishScanRun(s.db, runID,
 		stats.Found, stats.Skipped, stats.Ingested, stats.Duplicate, stats.Errors)
 	if finishErr != nil {
-		log.Printf("[scan] failed to finalise scan run %d: %v", runID, finishErr)
+		slog.Error("scan failed to finalise scan run", "run_id", runID, "err", finishErr)
 	}
 
 	if err := gdb.TouchLibraryPath(s.db, s.libraryPathID); err != nil {
-		log.Printf("[scan] failed to touch library path %d: %v", s.libraryPathID, err)
+		slog.Warn("scan failed to touch library path", "library_path_id", s.libraryPathID, "err", err)
 	}
 
 	if walkErr != nil {

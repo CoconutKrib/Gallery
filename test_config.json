@@ -34,6 +34,8 @@
   },
   "db_path": "./test_gallery.db",
   "cache_dir": "./.test_cache",
+  "log_file": "./gallery.log",
+  "log_level": "info",
   "scan_workers": 2,
   "event_gap_days": 2,
   "event_geo_km": 500,

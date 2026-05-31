@@ -3,7 +3,7 @@ package api
 import (
 	"database/sql"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -66,7 +66,7 @@ func (sm *ScanManager) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// Fetch latest scan run per library path from DB.
 	runs, err := db.GetAllLatestScanRuns(sm.database)
 	if err != nil {
-		log.Printf("[api/scan] fetching latest runs: %v", err)
+		slog.Warn("scan: fetch latest runs failed", "err", err)
 	}
 	resp.LastRuns = []scanRunDetail{}
 	for _, run := range runs {
@@ -152,7 +152,7 @@ func (sm *ScanManager) runScans(paths []config.LibraryPath) {
 	for _, lp := range paths {
 		lpID, err := db.UpsertLibraryPath(sm.database, lp.Path, lp.Label)
 		if err != nil {
-			log.Printf("[scan] upsert library path %q: %v", lp.Path, err)
+			slog.Error("scan: upsert library path failed", "path", lp.Path, "err", err)
 			continue
 		}
 
@@ -163,7 +163,7 @@ func (sm *ScanManager) runScans(paths []config.LibraryPath) {
 
 		scanner, err := scan.NewScanner(sm.cfg, sm.database, lpID)
 		if err != nil {
-			log.Printf("[scan] creating scanner for %q: %v", lp.Path, err)
+			slog.Error("scan: creating scanner failed", "path", lp.Path, "err", err)
 			continue
 		}
 		scanner.OnProgress = func(stats scan.Stats) {
@@ -172,22 +172,25 @@ func (sm *ScanManager) runScans(paths []config.LibraryPath) {
 			sm.mu.Unlock()
 		}
 
-		log.Printf("[scan] starting %q (%s)", lp.Path, lp.Label)
+		slog.Info("scan: starting", "path", lp.Path, "label", lp.Label)
 		stats, err := scanner.Run(lp.Path)
 		if err != nil {
-			log.Printf("[scan] %q failed: %v", lp.Path, err)
+			slog.Error("scan: failed", "path", lp.Path, "err", err)
 		}
-		log.Printf("[scan] %q done — found:%d skipped:%d ingested:%d duplicate:%d errors:%d",
-			lp.Path, stats.Found, stats.Skipped, stats.Ingested, stats.Duplicate, stats.Errors)
+		slog.Info("scan: done",
+			"path", lp.Path,
+			"found", stats.Found, "skipped", stats.Skipped,
+			"ingested", stats.Ingested, "duplicate", stats.Duplicate,
+			"errors", stats.Errors)
 	}
 
 	// Re-cluster after all scans complete.
 	gapDays := sm.cfg.EventGapDays
 	geoKm := sm.cfg.EventGeoKm
-	log.Printf("[cluster] running event clustering (gap=%dd, geo=%.0fkm)", gapDays, geoKm)
+	slog.Info("cluster: running", "gap_days", gapDays, "geo_km", geoKm)
 	if err := cluster.Run(sm.database, gapDays, geoKm); err != nil {
-		log.Printf("[cluster] error: %v", err)
+		slog.Error("cluster: failed", "err", err)
 	} else {
-		log.Printf("[cluster] done")
+		slog.Info("cluster: done")
 	}
 }

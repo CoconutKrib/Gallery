@@ -22,6 +22,7 @@ The user-facing term for the Gallery-managed copy is **"internal photo library"*
 ## 2. Phasing
 
 - **Phase 6** — Internal library infrastructure, staging queue, copy mechanism, review UI
+  - Also includes completion of previously-deferred settings UI work (inline whitelist/filter editing, ingest issues panel) as a preliminary step. This work is small and mostly unrelated to the internal library feature.
 - **Phase 7** — Dropzone source (lenient scanner, auto-stage on ingest)
 
 Dropzone is treated as a source detail; the internal library is the primary investment.
@@ -140,7 +141,7 @@ The user can set the following on any staged photo before or during the copy ste
 | `override_date` | RFC3339 UTC; replaces `captured_at` for path calculation and DB storage |
 | `override_lat`, `override_lon` | Manual GPS; marked as `approximate: true` in the DB |
 | `event_id` | Assign or reassign to an existing Gallery event |
-| `tags` | JSON string array; merged with any existing EXIF-derived flags |
+| `tags` | JSON string array; merged with any existing EXIF-derived flags; carried over verbatim to `library_copies.tags` at copy time |
 | `true_date_unknown` | Boolean; if set, photo lands in `_undated/` regardless of any date and is persistently tagged as archival/historic |
 
 `true_date_unknown` is stored on the `library_copies` row and surfaced as a flag in search results. It is a permanent marker: the exact original capture date cannot be known.
@@ -179,6 +180,7 @@ CREATE TABLE library_copies (
     relative_path    TEXT    NOT NULL,  -- e.g. 2024/06/Wedding-Smith/IMG_0001.jpg
     absolute_path    TEXT    NOT NULL,
     true_date_unknown INTEGER NOT NULL DEFAULT 0,
+    tags             TEXT    NOT NULL DEFAULT '[]',  -- JSON array; carried over from staging_queue at copy time
     copied_at        TEXT    NOT NULL
 );
 
@@ -211,6 +213,8 @@ All new endpoints are under the existing auth middleware.
 | `POST` | `/api/library/copy` | Trigger copy for all `approved` entries (async, returns job ID) |
 | `POST` | `/api/library/copy/{staging_id}` | Copy a single approved entry immediately |
 | `GET` | `/api/library/status` | Status of the last copy job |
+
+> **Clustering**: after a bulk copy job completes, `cluster.Run()` must be triggered so newly-added library photos are incorporated into event groups. Single-photo copies (`/api/library/copy/{staging_id}`) do not re-trigger clustering.
 
 ### 6.3 Internal Library — Browse
 
@@ -292,7 +296,7 @@ The existing `/api/scan` endpoint accepts an optional `{"source": "dropzone"}` b
 | Invariant | Enforcement |
 |---|---|
 | Internal library path not overlapping any library path | Config validation at startup |
-| Internal library never re-scanned as input | Path excluded from all scan walkers |
+| Internal library never re-scanned as input | `scanner.go` compares each walk root against `config.InternalLibrary.Path`; roots that equal or are subdirectories of it are skipped before walking begins |
 | Copy is idempotent (SHA-256 dedup) | `UNIQUE` constraint on `library_copies.photo_sha256` |
 | Originals never moved or deleted | Copy code only calls `os.Copy`; no rename/delete paths |
 | `true_date_unknown` is permanent | Exposed as a flag in all photo representations; never silently dropped |

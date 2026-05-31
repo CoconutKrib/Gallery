@@ -48,14 +48,17 @@ gallery/
 │   ├── db/
 │   │   ├── db.go            # Open connection, run migrations
 │   │   ├── migrations/
-│   │   │   └── 001_initial.sql  # Full schema (photos, duplicates, scan_runs, events, photo_events, faces stub)
+│   │   │   ├── 001_initial.sql  # Full schema (photos, duplicates, scan_runs, events, photo_events, faces stub)
+│   │   │   └── 002_internal_library.sql  # source column on photos, staging_queue, library_copies
 │   │   ├── photos.go        # Photo CRUD + scanPhotoRows helper
 │   │   ├── duplicates.go    # Duplicate path queries
 │   │   ├── queries.go       # ListPhotosFiltered, GetGeotaggedPhotos, GetPhotosNearby (bounding-box + Haversine)
 │   │   ├── events.go        # Event + photo_events CRUD (ClearEvents, InsertEvent, GetAllEvents, GetPhotosForEvent, GetEventForPhoto)
 │   │   ├── dedup_report.go  # GetLibraryDedupSummaries, GetCrossPathOverlap, GetSubtreeDedupEntries
 │   │   ├── scan_runs.go     # Scan run queries
-│   │   └── library_paths.go # Library path queries
+│   │   ├── library_paths.go # Library path queries
+│   │   ├── staging.go       # staging_queue CRUD (UpsertStaging, GetStaging, UpdateStagingState, ListByState)
+│   │   └── library_copies.go # library_copies CRUD (InsertCopy, GetCopyBySHA, ListLibraryCopies)
 │   │
 │   ├── scan/
 │   │   ├── scanner.go       # Directory walk, filter, dispatch; OnProgress callback; case-insensitive filename filters
@@ -67,6 +70,9 @@ gallery/
 │   ├── cluster/
 │   │   └── cluster.go       # Rule-based event clustering (gap days + geo distance); called after every scan
 │   │
+│   ├── library/
+│   │   └── copy.go          # CopyToLibrary: path construction, collision resolution, os.Copy, DB insert; bulk copy triggers cluster.Run
+│   │
 │   ├── api/
 │   │   ├── router.go        # Route registration, Handlers struct, authMiddleware
 │   │   ├── photos.go        # /api/photos list + detail (includes event_id, duplicates) + image/thumbnail serve
@@ -76,7 +82,9 @@ gallery/
 │   │   ├── timeline.go      # /api/timeline — bucket counts by zoom level (decade/year/month/week/day)
 │   │   ├── events.go        # /api/events list, /api/events/{id} detail + photos
 │   │   ├── dedup.go         # /api/dedup/report (library summaries + cross-path overlap), /api/dedup/subtree
-│   │   └── settings.go      # /api/settings get/post, login/logout, issues
+│   │   ├── settings.go      # /api/settings get/post, login/logout, issues
+│   │   ├── staging.go       # /api/staging CRUD + approve/reject state transitions
+│   │   └── library.go       # /api/library/copy, /api/library/status, /api/library/photos, /api/library/tree
 │   │
 │   └── auth/
 │       └── auth.go          # In-memory session store, bcrypt login, middleware helper
@@ -95,7 +103,9 @@ gallery/
     │   ├── map.js           # Geo map view (Leaflet, radius search, circle overlay)
     │   ├── events.js        # Event list + event detail photo grid
     │   ├── dedup.js         # Dedup report (per-library summary, cross-path overlap, subtree analyser)
-    │   └── settings.js      # Settings / scan management view
+│   │   ├── settings.js      # Settings / scan management view
+│   │   ├── staging.js       # Staging queue: photo grid + annotation form + approve/reject actions
+│   │   └── library.js       # Internal library browse: folder tree + photo grid
     └── vendor/
         ├── plotly.min.js    # Plotly basic bundle (vendored, ~1MB)
         └── leaflet/         # Leaflet 1.9.4 (JS, CSS, marker images)
@@ -119,16 +129,28 @@ gallery/
 
 ```go
 type Config struct {
-    LibraryPaths    []LibraryPath     `json:"library_paths"`
-    CameraWhitelist []CameraEntry     `json:"camera_whitelist"`
-    FilenameFilters FilenameFilters   `json:"filename_filters"`
-    Auth            AuthConfig        `json:"auth"`
-    DBPath          string            `json:"db_path"`
-    CacheDir        string            `json:"cache_dir"`
-    ScanWorkers     int               `json:"scan_workers"`       // thumbnail goroutine pool size, default 4
-    EventGapDays    int               `json:"event_gap_days"`     // default 2
-    EventGeoKm      float64           `json:"event_geo_km"`       // default 500
-    SessionTTLHours int               `json:"session_ttl_hours"`  // default 24
+    LibraryPaths    []LibraryPath          `json:"library_paths"`
+    CameraWhitelist []CameraEntry          `json:"camera_whitelist"`
+    FilenameFilters FilenameFilters        `json:"filename_filters"`
+    InternalLibrary InternalLibraryConfig  `json:"internal_library"`
+    Dropzone        DropzoneConfig         `json:"dropzone"`
+    Auth            AuthConfig             `json:"auth"`
+    DBPath          string                 `json:"db_path"`
+    CacheDir        string                 `json:"cache_dir"`
+    ScanWorkers     int                    `json:"scan_workers"`       // thumbnail goroutine pool size, default 4
+    EventGapDays    int                    `json:"event_gap_days"`     // default 2
+    EventGeoKm      float64                `json:"event_geo_km"`       // default 500
+    SessionTTLHours int                    `json:"session_ttl_hours"`  // default 24
+}
+
+type InternalLibraryConfig struct {
+    Path    string `json:"path"`
+    Enabled bool   `json:"enabled"`
+}
+
+type DropzoneConfig struct {
+    Path    string `json:"path"`
+    Enabled bool   `json:"enabled"`
 }
 ```
 
@@ -177,6 +199,8 @@ After all paths scanned:
 
 **HEIC support**: deferred — the pure-Go pipeline currently handles JPEG only (`isSupportedExtension` accepts `.jpg`/`.jpeg`). Extension check is case-insensitive.
 
+**Internal library path exclusion**: at the start of every scan walk, `scanner.go` must compare the walk root against `config.InternalLibrary.Path` (and `config.Dropzone.Path` for dropzone-aware scans). If a root equals or is a subdirectory of the internal library path it is silently skipped before walking. This prevents the managed copy tree from being inadvertently treated as a source.
+
 ### 3.5 Event clustering (`internal/cluster`)
 
 Triggered at the end of a successful scan run. Steps:
@@ -223,6 +247,8 @@ URL patterns match the slugs defined in requirements:
 - `/events`, `/events/:id` → `events.js`
 - `/dedup` → `dedup.js`
 - `/settings` → `settings.js`
+- `/staging` → `staging.js` (hidden when `internal_library.enabled = false`)
+- `/library` → `library.js` (hidden when `internal_library.enabled = false`)
 
 ### 4.2 Page modules
 
@@ -370,5 +396,9 @@ HEIC support is deferred. There is no npm build step.
 - `samples/duplicates/` added for dedup testing; clean scan: found:7 ingested:5 duplicate:2 → 4 events.
 - Filename filters: case-insensitive (`(?i)` wrap), exclude-beats-include, multiple patterns per list. Unit tests in `scanner_filter_test.go`.
 
-### Phase 6 — Settings UI enhancements
-- Inline config editing (camera whitelist, filename filters), ingest issues panel.
+### Phase 6 — Internal library + settings UI enhancements
+- **Settings UI** (preliminary, mostly unrelated to the main feature): inline config editing (camera whitelist, filename filters), ingest issues panel.
+- **Internal library infrastructure**: `InternalLibraryConfig` + `DropzoneConfig` in `Config`, DB migration `002_internal_library.sql` (`source` column on `photos`, `staging_queue`, `library_copies`), copy service (`internal/library/copy.go`), staging API (`/api/staging`), library API (`/api/library/copy`, `/api/library/status`, `/api/library/photos`, `/api/library/tree`), frontend `staging.js` + `library.js`.
+
+### Phase 7 — Dropzone
+- Lenient scanner mode (`strict` vs `lenient`), `source = 'dropzone'` tagging on ingested photos, auto-staging on ingest, `/api/scan` dropzone trigger.
