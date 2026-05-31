@@ -107,6 +107,11 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 			stats.Errors++
 			return nil // continue walking
 		}
+		// Skip any directory that is the internal library path or a child of it.
+		if d.IsDir() && s.isInternalLibraryPath(path) {
+			slog.Debug("scan: skipping internal library dir", "path", path)
+			return fs.SkipDir
+		}
 		if d.IsDir() {
 			return nil
 		}
@@ -220,6 +225,25 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 func isSupportedExtension(name string) bool {
 	lower := strings.ToLower(name)
 	return strings.HasSuffix(lower, ".jpg") || strings.HasSuffix(lower, ".jpeg")
+}
+
+// isInternalLibraryPath returns true if path equals or is a subdirectory of the
+// configured internal library path. Used to skip the managed copy tree during scans.
+func (s *Scanner) isInternalLibraryPath(path string) bool {
+	if !s.cfg.InternalLibrary.Enabled || s.cfg.InternalLibrary.Path == "" {
+		return false
+	}
+	ilAbs, err := filepath.Abs(s.cfg.InternalLibrary.Path)
+	if err != nil {
+		return false
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	ilAbs = filepath.Clean(ilAbs) + string(filepath.Separator)
+	pathAbs = filepath.Clean(pathAbs) + string(filepath.Separator)
+	return strings.HasPrefix(pathAbs, ilAbs)
 }
 
 // passesFilenameFilters returns false if the filename is rejected by include/exclude rules.

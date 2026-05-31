@@ -13,6 +13,8 @@ Gallery.router = (() => {
     { pattern: /^\/map$/, page: 'map' },
     { pattern: /^\/events(?:\/(\d+))?$/, page: 'events' },
     { pattern: /^\/dedup$/, page: 'dedup' },
+    { pattern: /^\/staging$/, page: 'staging' },
+    { pattern: /^\/library$/, page: 'library' },
     { pattern: /^\/settings$/, page: 'settings' },
     { pattern: /^\/$/, page: 'home' },
   ];
@@ -47,8 +49,20 @@ Gallery.router = (() => {
   // Handle back/forward.
   window.addEventListener('popstate', () => dispatch(location.href));
 
-  // Initial dispatch.
-  document.addEventListener('DOMContentLoaded', () => dispatch(location.href));
+  // Initial dispatch and settings bootstrap.
+  document.addEventListener('DOMContentLoaded', async () => {
+    // Load settings once to know if internal library is enabled.
+    try {
+      const s = await Gallery.utils.api('/api/settings');
+      Gallery.settings = s;
+      if (s.internal_library && s.internal_library.enabled) {
+        document.body.classList.add('library-enabled');
+      }
+    } catch (e) {
+      Gallery.settings = {};
+    }
+    dispatch(location.href);
+  });
 
   return { dispatch };
 })();

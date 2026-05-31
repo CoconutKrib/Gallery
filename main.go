@@ -31,6 +31,10 @@ func main() {
 		slog.Error("loading config", "err", err)
 		os.Exit(1)
 	}
+	if err := config.Validate(cfg); err != nil {
+		slog.Error("invalid config", "err", err)
+		os.Exit(1)
+	}
 
 	cleanupLog, err := logging.Setup(cfg.LogFile, cfg.LogLevel)
 	if err != nil {

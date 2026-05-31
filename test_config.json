@@ -39,5 +39,13 @@
   "scan_workers": 2,
   "event_gap_days": 2,
   "event_geo_km": 500,
-  "session_ttl_hours": 24
+  "session_ttl_hours": 24,
+  "internal_library": {
+    "path": "",
+    "enabled": false
+  },
+  "dropzone": {
+    "path": "",
+    "enabled": false
+  }
 }

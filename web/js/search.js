@@ -122,6 +122,7 @@ Gallery.search = {
         <img loading="lazy" src="${Gallery.utils.esc(p.thumbnail_url)}" alt="${Gallery.utils.esc(p.filename)}">
         <div class="photo-overlay">${Gallery.utils.esc(p.filename)}</div>
         ${hasFlags ? '<div class="flag-dot"></div>' : ''}
+        <button class="stage-btn" title="Add to staging queue" onclick="Gallery.utils.stagePhoto('${Gallery.utils.esc(p.sha256)}', event)">+Stage</button>
       </div>`;
     }).join('');
 

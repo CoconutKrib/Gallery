@@ -1,6 +1,17 @@
 # Internal Photo Library — Feature Specification
 
-## Status: Draft
+## Status: Implemented (Phase 6 complete; Phase 7 / Dropzone pending)
+
+### Implementation notes
+
+Phase 6 is fully implemented. The following deviations or clarifications apply:
+
+- **Nav hiding**: the Staging and Library nav links are always present in the HTML. Pages show a "not enabled" notice if `internal_library.enabled = false`. The `body` element gains the class `library-enabled` at startup (via `app.js`) when the feature is enabled — this class controls Stage button visibility on photo cards via CSS.
+- **`config.Validate()` call**: path-overlap validation is called at process startup in `main.go`, immediately after loading the config file.
+- **Scanner exclusion**: `scanner.go` receives a new `isInternalLibraryPath()` method that returns `fs.SkipDir` for any directory that equals or is a subdirectory of `internal_library.path`, preventing the managed copy tree from being inadvertently re-scanned.
+- **Stage button on photo cards**: added to both Browse and Search grids. The button is hidden by CSS until `library-enabled` is set on `<body>`. It calls `Gallery.utils.stagePhoto()` which POSTs to `/api/staging`.
+- **Bulk copy job state**: implemented as a package-level `copyJobStatus` struct in `internal/api/library.go` (not a persistent DB record). The status is in-memory only and is reset on server restart.
+- **`source` column on `photos`**: added by migration `002_internal_library.sql` with `DEFAULT 'scan'`. The dropzone `'dropzone'` value is reserved for Phase 7.
 
 ---
 
@@ -307,7 +318,7 @@ The existing `/api/scan` endpoint accepts an optional `{"source": "dropzone"}` b
 ## 10. Open Questions / Future Work
 
 - **Re-organization**: if a user later supplies a date for an `_undated` photo, should Gallery move the file within the internal library or leave it and update the DB path? (Suggested: move the file, update `library_copies.relative_path` and `absolute_path`.)
-- **Removal from internal library**: out of scope for Phase 6/7. When implemented: delete the physical file, remove the `library_copies` row; source photo record in `photos` is retained.
-- **Export**: bulk export/zip of the internal library is a separate future feature.
+- **Removal from internal library**: out of scope for Phase 6/7. When implemented: delete the physical file, remove the `library_copies` row; source photo record in `photos` is also deleted - the photo records and file are totally removed from the gallery internal databases and library - it would need a re-scan to reappear in staging.
+- **Export**: bulk export/zip of the internal library is a separate future feature. External library is a pure filesystem structure, so could be copied out directly (the photo metadata, such as event membership or overridden dates, or manually added descriptions, all of which are stored in the sqlite database could be exported as a separate json file and stored alonside this)
 - **Multiple event membership**: current model assigns one event per photo; many-to-many is a future schema change.
 - **Dropzone watch mode**: instead of manual scan trigger, inotify/fsnotify watch on the dropzone folder. Out of scope for Phase 7.

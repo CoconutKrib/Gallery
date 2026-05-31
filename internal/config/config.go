@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type LibraryPath struct {
@@ -30,19 +31,31 @@ type AuthConfig struct {
 	SessionSecret string `json:"session_secret"`
 }
 
+type InternalLibraryConfig struct {
+	Path    string `json:"path"`
+	Enabled bool   `json:"enabled"`
+}
+
+type DropzoneConfig struct {
+	Path    string `json:"path"`
+	Enabled bool   `json:"enabled"`
+}
+
 type Config struct {
-	LibraryPaths    []LibraryPath   `json:"library_paths"`
-	CameraWhitelist []CameraEntry   `json:"camera_whitelist"`
-	FilenameFilters FilenameFilters `json:"filename_filters"`
-	Auth            AuthConfig      `json:"auth"`
-	DBPath          string          `json:"db_path"`
-	CacheDir        string          `json:"cache_dir"`
-	LogFile         string          `json:"log_file"`
-	LogLevel        string          `json:"log_level"`
-	ScanWorkers     int             `json:"scan_workers"`
-	EventGapDays    int             `json:"event_gap_days"`
-	EventGeoKm      float64         `json:"event_geo_km"`
-	SessionTTLHours int             `json:"session_ttl_hours"`
+	LibraryPaths    []LibraryPath         `json:"library_paths"`
+	CameraWhitelist []CameraEntry         `json:"camera_whitelist"`
+	FilenameFilters FilenameFilters       `json:"filename_filters"`
+	Auth            AuthConfig            `json:"auth"`
+	DBPath          string                `json:"db_path"`
+	CacheDir        string                `json:"cache_dir"`
+	LogFile         string                `json:"log_file"`
+	LogLevel        string                `json:"log_level"`
+	ScanWorkers     int                   `json:"scan_workers"`
+	EventGapDays    int                   `json:"event_gap_days"`
+	EventGeoKm      float64               `json:"event_geo_km"`
+	SessionTTLHours int                   `json:"session_ttl_hours"`
+	InternalLibrary InternalLibraryConfig `json:"internal_library"`
+	Dropzone        DropzoneConfig        `json:"dropzone"`
 }
 
 func defaults() Config {
@@ -103,6 +116,45 @@ func Load(path string) (*Config, error) {
 // Save writes cfg to path atomically (write temp, rename).
 func Save(path string, cfg *Config) error {
 	return save(path, cfg)
+}
+
+// Validate checks configuration constraints. Returns a non-nil error if the
+// config is invalid (e.g. internal library path overlaps a scan library path).
+func Validate(cfg *Config) error {
+	if !cfg.InternalLibrary.Enabled || cfg.InternalLibrary.Path == "" {
+		return nil
+	}
+	ilAbs, err := filepath.Abs(cfg.InternalLibrary.Path)
+	if err != nil {
+		return fmt.Errorf("internal_library.path: %w", err)
+	}
+	for _, lp := range cfg.LibraryPaths {
+		lpAbs, err := filepath.Abs(lp.Path)
+		if err != nil {
+			continue
+		}
+		if pathOverlaps(ilAbs, lpAbs) {
+			return fmt.Errorf("internal_library.path %q overlaps library_path %q", ilAbs, lpAbs)
+		}
+	}
+	if cfg.Dropzone.Enabled && cfg.Dropzone.Path != "" {
+		dzAbs, err := filepath.Abs(cfg.Dropzone.Path)
+		if err != nil {
+			return fmt.Errorf("dropzone.path: %w", err)
+		}
+		if pathOverlaps(ilAbs, dzAbs) {
+			return fmt.Errorf("internal_library.path %q overlaps dropzone.path %q", ilAbs, dzAbs)
+		}
+	}
+	return nil
+}
+
+// pathOverlaps returns true if a and b are the same directory or one is a
+// subdirectory of the other.
+func pathOverlaps(a, b string) bool {
+	a = filepath.Clean(a) + string(filepath.Separator)
+	b = filepath.Clean(b) + string(filepath.Separator)
+	return strings.HasPrefix(a, b) || strings.HasPrefix(b, a)
 }
 
 func save(path string, cfg *Config) error {

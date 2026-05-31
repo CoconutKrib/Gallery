@@ -138,6 +138,7 @@ function renderMain(data, libraryId) {
         <img src="${Gallery.utils.esc(p.thumbnail_url)}" loading="lazy" alt="${Gallery.utils.esc(p.filename)}">
         ${hasFlag ? '<div class="flag-dot" title="Data issues"></div>' : ''}
         <div class="photo-overlay">${Gallery.utils.esc(p.filename)}</div>
+        <button class="stage-btn" title="Add to staging queue" onclick="Gallery.utils.stagePhoto('${Gallery.utils.esc(p.sha256)}', event)">+Stage</button>
       </div>`;
     }
     content += `</div>`;

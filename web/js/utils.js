@@ -48,6 +48,23 @@ Gallery.utils = {
     Gallery.router.dispatch(url);
   },
 
+  // Add a photo to the staging queue. evt is the click event (to stop propagation).
+  async stagePhoto(sha256, evt) {
+    if (evt) evt.stopPropagation();
+    try {
+      await Gallery.utils.api('/api/staging', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sha256 }),
+      });
+      // Brief visual confirmation on the button.
+      const btn = evt && evt.target.closest('.stage-btn');
+      if (btn) { btn.textContent = '✓'; btn.disabled = true; }
+    } catch (e) {
+      alert('Could not stage photo: ' + e.message);
+    }
+  },
+
   // Set the active nav link.
   setActiveNav(prefix) {
     document.querySelectorAll('.nav-links a').forEach(a => {

@@ -65,6 +65,22 @@ func (h *Handlers) RegisterRoutes(mux *http.ServeMux, staticFS http.FileSystem) 
 	api("GET", "/api/dedup/report", h.handleDedupReport)
 	api("GET", "/api/dedup/subtree", h.handleDedupSubtree)
 
+	// Staging queue.
+	api("GET", "/api/staging", h.handleListStaging)
+	api("POST", "/api/staging", h.handleAddToStaging)
+	api("GET", "/api/staging/{id}", h.handleGetStagingEntry)
+	api("PATCH", "/api/staging/{id}", h.handleUpdateStagingEntry)
+	api("POST", "/api/staging/{id}/approve", h.handleApproveStaging)
+	api("POST", "/api/staging/{id}/reject", h.handleRejectStaging)
+	api("DELETE", "/api/staging/{id}", h.handleDeleteStagingEntry)
+
+	// Internal library.
+	api("GET", "/api/library/photos", h.handleLibraryPhotos)
+	api("GET", "/api/library/tree", h.handleLibraryTree)
+	api("GET", "/api/library/status", h.handleLibraryStatus)
+	api("POST", "/api/library/copy", h.handleLibraryCopyAll)
+	api("POST", "/api/library/copy/{staging_id}", h.handleLibraryCopyOne)
+
 	// Static assets.
 	static := http.FileServer(staticFS)
 	mux.HandleFunc("GET /css/", h.authMiddleware(static.ServeHTTP))

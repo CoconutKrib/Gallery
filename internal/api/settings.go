@@ -23,16 +23,20 @@ func (h *Handlers) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		"event_gap_days":    h.cfg.EventGapDays,
 		"event_geo_km":      h.cfg.EventGeoKm,
 		"session_ttl_hours": h.cfg.SessionTTLHours,
+		"internal_library":  h.cfg.InternalLibrary,
+		"dropzone":          h.cfg.Dropzone,
 	})
 }
 
 type settingsUpdateRequest struct {
-	LibraryPaths    *[]config.LibraryPath   `json:"library_paths"`
-	CameraWhitelist *[]config.CameraEntry   `json:"camera_whitelist"`
-	FilenameFilters *config.FilenameFilters `json:"filename_filters"`
-	ScanWorkers     *int                    `json:"scan_workers"`
-	EventGapDays    *int                    `json:"event_gap_days"`
-	EventGeoKm      *float64                `json:"event_geo_km"`
+	LibraryPaths    *[]config.LibraryPath         `json:"library_paths"`
+	CameraWhitelist *[]config.CameraEntry         `json:"camera_whitelist"`
+	FilenameFilters *config.FilenameFilters       `json:"filename_filters"`
+	ScanWorkers     *int                          `json:"scan_workers"`
+	EventGapDays    *int                          `json:"event_gap_days"`
+	EventGeoKm      *float64                      `json:"event_geo_km"`
+	InternalLibrary *config.InternalLibraryConfig `json:"internal_library"`
+	Dropzone        *config.DropzoneConfig        `json:"dropzone"`
 	// Auth password change.
 	NewPassword *string `json:"new_password"`
 	AuthEnabled *bool   `json:"auth_enabled"`
@@ -62,6 +66,12 @@ func (h *Handlers) handlePostSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.EventGeoKm != nil && *req.EventGeoKm > 0 {
 		h.cfg.EventGeoKm = *req.EventGeoKm
+	}
+	if req.InternalLibrary != nil {
+		h.cfg.InternalLibrary = *req.InternalLibrary
+	}
+	if req.Dropzone != nil {
+		h.cfg.Dropzone = *req.Dropzone
 	}
 	if req.AuthEnabled != nil {
 		h.cfg.Auth.Enabled = *req.AuthEnabled

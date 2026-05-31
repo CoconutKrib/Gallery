@@ -51,16 +51,20 @@ go run . --config test_config.json --scan
   slog.Error("scan insert error", "path", path, "err", insertErr)
   ```
   Level guide: `Info` for normal milestones, `Warn` for recoverable problems (single file failures), `Error` for failures that affect correctness. `Debug` for verbose detail useful only when diagnosing. All HTTP requests are logged automatically by `logging.HTTPMiddleware` — do not log them manually in handlers. Never import `"log"` in new files; always import `"log/slog"`.
+- **Internal library** — when `internal_library.enabled = true`, `config.Validate()` checks that the library path does not overlap any scan library path or dropzone path. `scanner.go` skips any walk subtree that is inside `internal_library.path` (via `isInternalLibraryPath()`). All staging/library APIs return `409 Conflict` if `internal_library.enabled = false`. The body class `library-enabled` is set at startup by `app.js` and controls CSS visibility of Stage buttons on photo cards.
 
 ## Project structure
+
+Consider cross checking against architecture.md for more detailed runthrough
 
 ```
 main.go                        # embed + wire Handlers + http.ListenAndServe
 internal/
-  config/config.go             # Config struct, atomic load/save
+  config/config.go             # Config struct (incl. InternalLibraryConfig, DropzoneConfig), Validate(), atomic load/save
   db/
     db.go                      # Open SQLite (WAL, FK on), run embed.FS migrations
     migrations/001_initial.sql # Full schema
+    migrations/002_internal_library.sql  # source col on photos; staging_queue; library_copies
     photos.go                  # Photo CRUD; InsertPhoto, scanPhotoRows
     queries.go                 # PhotoFilter + ListPhotosFiltered, GetGeotaggedPhotos, GetPhotosNearby
     duplicates.go              # duplicate_paths CRUD
@@ -68,14 +72,18 @@ internal/
     dedup_report.go            # GetLibraryDedupSummaries, GetCrossPathOverlap, GetSubtreeDedupEntries
     library_paths.go           # UpsertLibraryPath, GetLibraryPathByID
     scan_runs.go               # InsertScanRun, FinishScanRun, GetAllLatestScanRuns
+    staging.go                 # StagingEntry CRUD; InsertStagingEntry, ListStagingEntries, UpdateStagingEntry, SetStagingState
+    library.go                 # LibraryCopy CRUD; InsertLibraryCopy, ListLibraryCopies, GetLibraryTree
   scan/
-    scanner.go                 # Walk + filter; OnProgress callback; canonical-path dedup fix; case-insensitive filename filters ((?i) wrap)
+    scanner.go                 # Walk + filter; isInternalLibraryPath() skips managed copy tree; OnProgress callback
     scanner_filter_test.go     # Tests for include/exclude filter logic (case sensitivity, exclude-beats-include, multiple patterns)
     exif.go                    # EXIF extraction; Flags() returns []string{} never nil
     hash.go                    # SHA-256
     thumbnail.go               # 400px long-edge JPEG; idempotent
   cluster/
     cluster.go                 # Rule-based event clustering (gap days + geo distance); called after every scan
+  library/
+    copy.go                    # CopyPhoto: path construction (year/month/event slug, _undated/), collision resolution, os.Copy
   auth/auth.go                 # In-memory session store (token→expiry), bcrypt, cookie
   api/
     router.go                  # Handlers struct, RegisterRoutes, authMiddleware, helpers
@@ -87,20 +95,24 @@ internal/
     events.go                  # /api/events, /api/events/{id}
     dedup.go                   # /api/dedup/report, /api/dedup/subtree?prefix=
     settings.go                # /api/settings, /api/login, /api/logout, /api/issues
+    staging.go                 # /api/staging CRUD + approve/reject transitions
+    library.go                 # /api/library/copy (bulk+single), /api/library/status, /api/library/photos, /api/library/tree
 web/
   index.html                   # SPA shell; loads all JS modules
   css/app.css                  # Dark theme (CSS custom properties)
   js/
-    app.js                     # History API router (routes: browse, photo, search, timeline, map, events, dedup, settings)
-    utils.js                   # api(), formatDate, formatCoord, esc, navigate, setActiveNav
-    browse.js                  # Folder browser + photo grid
+    app.js                     # History API router; bootstraps Gallery.settings + library-enabled body class
+    utils.js                   # api(), formatDate, formatCoord, esc, navigate, setActiveNav, stagePhoto()
+    browse.js                  # Folder browser + photo grid (Stage button on cards)
     photo.js                   # Photo detail + EXIF table + duplicates + event link
-    search.js                  # Filter form + paginated grid (URL query state)
+    search.js                  # Filter form + paginated grid (Stage button on cards)
     timeline.js                # Plotly bar chart + click-to-grid
     map.js                     # Leaflet map, all pins + radius search with circle overlay
     events.js                  # Event list cards + event detail photo grid
     dedup.js                   # Per-library summary, cross-library overlap, subtree analyser
     settings.js                # Library paths, scan trigger/poll, config display
+    staging.js                 # Staging queue: two-panel review UI with annotation form
+    library.js                 # Internal library browse: sidebar tree + photo grid
   vendor/
     plotly.min.js              # Plotly basic bundle (~1MB, vendored)
     leaflet/                   # Leaflet 1.9.4 (JS, CSS, marker images)
@@ -116,14 +128,15 @@ samples/
 - ✅ **Phase 3** — Search/filter view, timeline view (Plotly), `/api/timeline` endpoint.
 - ✅ **Phase 4** — Geo/map view (Leaflet, radius search, server-side Haversine).
 - ✅ **Phase 5** — Event clustering (rule-based, `internal/cluster`), event browsing (`/events`, `/api/events`), dedup report (`/dedup`, `/api/dedup/report`, `/api/dedup/subtree`).
-- ⬜ **Phase 6** — Settings UI enhancements (inline editing of whitelist/filters, issues panel).
+- ✅ **Phase 6** — Internal library infrastructure: `InternalLibraryConfig` + `DropzoneConfig` in `Config`, `config.Validate()` at startup, DB migration `002_internal_library.sql` (`source` col, `staging_queue`, `library_copies`), copy service (`internal/library/copy.go`), staging API (`/api/staging`), library API (`/api/library/*`), frontend `staging.js` + `library.js`, Stage button on photo cards (CSS-gated by `library-enabled` body class), scanner path exclusion.
+- ⬜ **Phase 7** — Dropzone source (lenient scanner, auto-stage on ingest). `source` column and `DropzoneConfig` struct already in place.
 
 ## Known issues / backlog (from TODO.md)
 
 - Manual lat/lon override for photos missing GPS — store as sidecar-style DB data with an `approximate` flag and optional radius.
 - Notes/description fields per photo.
 - Export of data/metadata.
-- Settings UI enhancements: inline editing of camera whitelist, filename filters, issues panel (Phase 6).
+- Phase 7 (Dropzone): lenient scanner, auto-stage on ingest, `source='dropzone'` on photos.
 
 ## Sample data
 
