@@ -65,6 +65,7 @@ internal/
     db.go                      # Open SQLite (WAL, FK on), run embed.FS migrations
     migrations/001_initial.sql # Full schema
     migrations/002_internal_library.sql  # source col on photos; staging_queue; library_copies
+    migrations/003_library_copy_metadata.sql  # title, description, override_date, event_id on library_copies
     photos.go                  # Photo CRUD; InsertPhoto, scanPhotoRows
     queries.go                 # PhotoFilter + ListPhotosFiltered, GetGeotaggedPhotos, GetPhotosNearby
     duplicates.go              # duplicate_paths CRUD
@@ -73,7 +74,7 @@ internal/
     library_paths.go           # UpsertLibraryPath, GetLibraryPathByID
     scan_runs.go               # InsertScanRun, FinishScanRun, GetAllLatestScanRuns
     staging.go                 # StagingEntry CRUD; InsertStagingEntry, ListStagingEntries, UpdateStagingEntry, SetStagingState
-    library.go                 # LibraryCopy CRUD; InsertLibraryCopy, ListLibraryCopies, GetLibraryTree
+    library.go                 # LibraryCopy CRUD; InsertLibraryCopy, GetLibraryCopyByID, UpdateLibraryCopy, DeleteLibraryPhotoByID, ListLibraryCopiesFiltered, GetLibraryTree
   scan/
     scanner.go                 # Walk + filter; isInternalLibraryPath() skips managed copy tree; OnProgress callback
     scanner_filter_test.go     # Tests for include/exclude filter logic (case sensitivity, exclude-beats-include, multiple patterns)
@@ -83,7 +84,7 @@ internal/
   cluster/
     cluster.go                 # Rule-based event clustering (gap days + geo distance); called after every scan
   library/
-    copy.go                    # CopyPhoto: path construction (year/month/event slug, _undated/), collision resolution, os.Copy
+    copy.go                    # CopyPhoto: path construction (year/month/event slug, _undated/), collision resolution, os.Copy; MovePhoto + pruneEmptyDirs for re-org; BuildRelDir/ResolveFilename exported
   auth/auth.go                 # In-memory session store (token→expiry), bcrypt, cookie
   api/
     router.go                  # Handlers struct, RegisterRoutes, authMiddleware, helpers
@@ -96,13 +97,13 @@ internal/
     dedup.go                   # /api/dedup/report, /api/dedup/subtree?prefix=
     settings.go                # /api/settings, /api/login, /api/logout, /api/issues
     staging.go                 # /api/staging CRUD + approve/reject transitions
-    library.go                 # /api/library/copy (bulk+single), /api/library/status, /api/library/photos, /api/library/tree
+    library.go                 # /api/library/copy (bulk+single), /api/library/status, /api/library/photos, /api/library/tree, PATCH+DELETE /api/library/copies/{id}
 web/
   index.html                   # SPA shell; loads all JS modules
   css/app.css                  # Dark theme (CSS custom properties)
   js/
     app.js                     # History API router; bootstraps Gallery.settings + library-enabled body class
-    utils.js                   # api(), formatDate, formatCoord, esc, navigate, setActiveNav, stagePhoto()
+    utils.js                   # api(), formatDate, formatCoord, esc, navigate, setActiveNav, stagePhoto(); handles 204 No Content
     browse.js                  # Folder browser + photo grid (Stage button on cards)
     photo.js                   # Photo detail + EXIF table + duplicates + event link
     search.js                  # Filter form + paginated grid (Stage button on cards)
@@ -112,7 +113,7 @@ web/
     dedup.js                   # Per-library summary, cross-library overlap, subtree analyser
     settings.js                # Library paths, scan trigger/poll, config display
     staging.js                 # Staging queue: two-panel review UI with annotation form
-    library.js                 # Internal library browse: sidebar tree + photo grid
+    library.js                 # Internal library browse: sidebar tree + filter bar + photo grid; edit panel (title/description/tags/dates/event); remove-with-confirmation
   vendor/
     plotly.min.js              # Plotly basic bundle (~1MB, vendored)
     leaflet/                   # Leaflet 1.9.4 (JS, CSS, marker images)
@@ -129,14 +130,16 @@ samples/
 - ✅ **Phase 4** — Geo/map view (Leaflet, radius search, server-side Haversine).
 - ✅ **Phase 5** — Event clustering (rule-based, `internal/cluster`), event browsing (`/events`, `/api/events`), dedup report (`/dedup`, `/api/dedup/report`, `/api/dedup/subtree`).
 - ✅ **Phase 6** — Internal library infrastructure: `InternalLibraryConfig` + `DropzoneConfig` in `Config`, `config.Validate()` at startup, DB migration `002_internal_library.sql` (`source` col, `staging_queue`, `library_copies`), copy service (`internal/library/copy.go`), staging API (`/api/staging`), library API (`/api/library/*`), frontend `staging.js` + `library.js`, Stage button on photo cards (CSS-gated by `library-enabled` body class), scanner path exclusion.
-- ⬜ **Phase 7** — Dropzone source (lenient scanner, auto-stage on ingest). `source` column and `DropzoneConfig` struct already in place.
+- ✅ **Phase 7** — Dropzone source (lenient scanner, auto-stage on ingest, `source='dropzone'` on photos).
+- ✅ **Phase 8** — Library copy editing & re-organisation: migration `003_library_copy_metadata.sql` (`title`, `description`, `override_date`, `event_id` on `library_copies`), `PATCH /api/library/copies/{id}` with re-org trigger (`MovePhoto`, `pruneEmptyDirs`), extended `GET /api/library/photos` filters (`source`, `has_date_override`, `true_date_unknown`, `tag`, `event_id`, `q`), edit panel in `library.js`.
+- ✅ **Phase 9** — Library photo removal: `DELETE /api/library/copies/{id}` with full cascade (photo_events → staging_queue → duplicate_paths → library_copies → photos) + physical file delete, confirmation UI in `library.js`.
 
 ## Known issues / backlog (from TODO.md)
 
 - Manual lat/lon override for photos missing GPS — store as sidecar-style DB data with an `approximate` flag and optional radius.
-- Notes/description fields per photo.
+- Notes/description fields per photo (discovery layer; separate from library copy annotations).
 - Export of data/metadata.
-- Phase 7 (Dropzone): lenient scanner, auto-stage on ingest, `source='dropzone'` on photos.
+- Dropzone watch mode (inotify/fsnotify) — instead of manual scan trigger.
 
 ## Sample data
 
@@ -152,3 +155,7 @@ samples/
 - **`captured_at` strftime failure** — Go's `time.Time.String()` produces `"2012-04-15 18:58:46 +0100 BST"` which SQLite cannot parse with `strftime`. Always format as `time.RFC3339` before inserting.
 - **Filename filter case sensitivity** — regex patterns compiled as-is are case-sensitive; `^dscn` won't match `DSCN0042.JPG`. All patterns are wrapped with `(?i)` via `caseInsensitivePattern()` before compiling.
 - **Cluster `photoPoint` type** must be declared at package scope, not inside `Run()`, because `centroid()` takes `[]photoPoint` as a parameter.
+- **Double-pointer pattern in `LibraryCopyUpdate`** — `**string` fields: outer `nil` = skip field, outer non-nil pointing to nil `*string` = clear column to NULL. This avoids ambiguity between "field not in JSON" and "field explicitly nulled".
+- **`MovePhoto` parent-dir extraction** — uses `strings.LastIndex(lc.RelativePath, "/")` rather than any helper from another package; `splitPath` is not exported from `internal/db`.
+- **`ListLibraryCopiesFiltered` column aliasing** — all `SELECT` columns must be prefixed with `lc.` (e.g. `lc.id, lc.photo_sha256, …`) when JOINing the `photos` table to avoid "ambiguous column name" SQLite errors.
+- **`utils.js` 204 handling** — `Gallery.utils.api()` must short-circuit before calling `res.json()` when `res.status === 204`; calling `.json()` on an empty body throws a SyntaxError.

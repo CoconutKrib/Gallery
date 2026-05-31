@@ -2,9 +2,12 @@ package api
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -156,7 +159,43 @@ func (h *Handlers) handleLibraryPhotos(w http.ResponseWriter, r *http.Request) {
 	if !h.stagingEnabled(w) {
 		return
 	}
-	copies, err := db.ListLibraryCopies(h.db)
+
+	f := db.LibraryCopyFilter{
+		Source:  r.URL.Query().Get("source"),
+		Tag:     r.URL.Query().Get("tag"),
+		Keyword: r.URL.Query().Get("q"),
+	}
+	if v := r.URL.Query().Get("has_date_override"); v == "true" {
+		t := true
+		f.HasDateOverride = &t
+	} else if v == "false" {
+		t := false
+		f.HasDateOverride = &t
+	}
+	if v := r.URL.Query().Get("true_date_unknown"); v == "true" {
+		t := true
+		f.TrueDateUnknown = &t
+	} else if v == "false" {
+		t := false
+		f.TrueDateUnknown = &t
+	}
+	if v := r.URL.Query().Get("event_id"); v != "" {
+		if id, err := strconv.ParseInt(v, 10, 64); err == nil {
+			f.EventID = &id
+		}
+	}
+	if v := r.URL.Query().Get("page"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			f.Page = n
+		}
+	}
+	if v := r.URL.Query().Get("per_page"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			f.PerPage = n
+		}
+	}
+
+	copies, total, err := db.ListLibraryCopiesFiltered(h.db, f)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "db error")
 		return
@@ -170,8 +209,134 @@ func (h *Handlers) handleLibraryPhotos(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"photos": out,
-		"total":  len(out),
+		"total":  total,
 	})
+}
+
+// PATCH /api/library/copies/{id}
+func (h *Handlers) handleLibraryCopyPatch(w http.ResponseWriter, r *http.Request) {
+	if !h.stagingEnabled(w) {
+		return
+	}
+	id, err := parseID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	lc, err := db.GetLibraryCopyByID(h.db, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "library copy not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "db error")
+		}
+		return
+	}
+
+	// Decode partial update from JSON body.
+	var req struct {
+		Title           *string   `json:"title"`
+		Description     *string   `json:"description"`
+		Tags            *[]string `json:"tags"`
+		EventID         *int64    `json:"event_id"`
+		OverrideDate    *string   `json:"override_date"`
+		TrueDateUnknown *bool     `json:"true_date_unknown"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Remember whether date-related fields changed so we can trigger re-org.
+	oldOverrideDate := lc.OverrideDate
+	oldTrueDateUnknown := lc.TrueDateUnknown
+
+	// Build the DB update.
+	update := db.LibraryCopyUpdate{
+		Title:       toDoublePtr(req.Title),
+		Description: toDoublePtr(req.Description),
+		Tags:        req.Tags,
+		EventID:     toDoublePtrInt(req.EventID),
+	}
+	if req.OverrideDate != nil {
+		var od *string
+		if *req.OverrideDate != "" {
+			if _, err := time.Parse(time.RFC3339, *req.OverrideDate); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid override_date: must be RFC3339")
+				return
+			}
+			od = req.OverrideDate
+		}
+		update.OverrideDate = &od
+		lc.OverrideDate = od
+	}
+	if req.TrueDateUnknown != nil {
+		update.TrueDateUnknown = req.TrueDateUnknown
+		lc.TrueDateUnknown = *req.TrueDateUnknown
+	}
+
+	if err := db.UpdateLibraryCopy(h.db, id, update); err != nil {
+		writeError(w, http.StatusInternalServerError, "db update failed")
+		return
+	}
+
+	// Re-organisation: if date-related fields changed, potentially move the file.
+	dateMayHaveChanged := ptrStringChanged(oldOverrideDate, lc.OverrideDate) ||
+		(req.TrueDateUnknown != nil && lc.TrueDateUnknown != oldTrueDateUnknown)
+	if dateMayHaveChanged {
+		// Re-fetch the updated copy (so EventID etc. are current).
+		if updated, err := db.GetLibraryCopyByID(h.db, id); err == nil {
+			lc = updated
+		}
+		photo, err := db.GetPhotoBySHA256(h.db, lc.PhotoSHA256)
+		if err == nil {
+			if _, moveErr := library.MovePhoto(h.db, lc, photo, h.cfg.InternalLibrary.Path); moveErr != nil {
+				slog.Warn("library: re-org move failed", "id", id, "err", moveErr)
+				writeError(w, http.StatusInternalServerError, "file move failed: "+moveErr.Error())
+				return
+			}
+		}
+	}
+
+	// Return updated record.
+	final, err := db.GetLibraryCopyByID(h.db, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	writeJSON(w, http.StatusOK, libraryCopyJSON(final))
+}
+
+// DELETE /api/library/copies/{id}
+func (h *Handlers) handleLibraryCopyDelete(w http.ResponseWriter, r *http.Request) {
+	if !h.stagingEnabled(w) {
+		return
+	}
+	id, err := parseID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	sha256, absPath, err := db.DeleteLibraryPhotoByID(h.db, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "library copy not found")
+		} else {
+			slog.Error("library: delete failed", "id", id, "err", err)
+			writeError(w, http.StatusInternalServerError, "db error")
+		}
+		return
+	}
+
+	// Delete the physical file. If already absent, log a warning but don't fail.
+	if removeErr := removeFile(absPath, h.cfg.InternalLibrary.Path); removeErr != nil {
+		slog.Warn("library: physical file delete failed", "sha256", sha256[:8], "path", absPath, "err", removeErr)
+		// DB records are already gone — log and continue.
+	}
+
+	slog.Info("library: removed photo", "sha256", sha256[:8], "path", absPath)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // GET /api/library/tree
@@ -199,5 +364,47 @@ func libraryCopyJSON(c *db.LibraryCopy) map[string]any {
 		"true_date_unknown": c.TrueDateUnknown,
 		"tags":              c.Tags,
 		"copied_at":         c.CopiedAt,
+		"title":             c.Title,
+		"description":       c.Description,
+		"override_date":     c.OverrideDate,
+		"event_id":          c.EventID,
 	}
+}
+
+// removeFile deletes absPath if it exists and is within libraryRoot.
+func removeFile(absPath, libraryRoot string) error {
+	if !pathIsWithinRoots(absPath, []string{libraryRoot}) {
+		return nil // safety: refuse to delete outside library root
+	}
+	if err := os.Remove(absPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// toDoublePtr converts *string to **string for LibraryCopyUpdate.
+func toDoublePtr(p *string) **string {
+	if p == nil {
+		return nil
+	}
+	return &p
+}
+
+// toDoublePtrInt converts *int64 to **int64 for LibraryCopyUpdate.
+func toDoublePtrInt(p *int64) **int64 {
+	if p == nil {
+		return nil
+	}
+	return &p
+}
+
+// ptrStringChanged returns true if two *string pointers hold different values.
+func ptrStringChanged(a, b *string) bool {
+	if a == nil && b == nil {
+		return false
+	}
+	if a == nil || b == nil {
+		return true
+	}
+	return *a != *b
 }

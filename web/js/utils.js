@@ -11,6 +11,7 @@ Gallery.utils = {
       window.location.href = '/login';
       throw new Error('unauthorized');
     }
+    if (res.status === 204) return null;
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'request failed');
     return data;

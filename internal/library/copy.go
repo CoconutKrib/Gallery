@@ -63,14 +63,115 @@ func CopyPhoto(database *sql.DB, entry *db.StagingEntry, photo *db.Photo, librar
 	if tags == nil {
 		tags = []string{}
 	}
+	// Override date to store: use what was used for path calculation.
+	var storedOverrideDate *string
+	if entry.OverrideDate != nil && *entry.OverrideDate != "" {
+		storedOverrideDate = entry.OverrideDate
+	}
 	_, err := db.InsertLibraryCopy(database, &db.LibraryCopy{
 		PhotoSHA256:     photo.SHA256,
 		RelativePath:    relPath,
 		AbsolutePath:    absPath,
 		TrueDateUnknown: trueDateUnknown,
 		Tags:            tags,
+		Title:           entry.Title,
+		Description:     entry.Description,
+		OverrideDate:    storedOverrideDate,
+		EventID:         entry.EventID,
 	})
 	return relPath, err
+}
+
+// BuildRelDir is the exported form of buildRelDir: constructs the directory
+// path segment (relative to libraryRoot) for a photo based on its date and
+// optional event. Used by the copy service and the re-organisation handler.
+func BuildRelDir(capturedAt *time.Time, trueDateUnknown bool, eventID *int64, database *sql.DB) string {
+	return buildRelDir(capturedAt, trueDateUnknown, eventID, database)
+}
+
+// ResolveFilename is the exported form of resolveFilename.
+func ResolveFilename(filename, sha256, destDir string) string {
+	return resolveFilename(filename, sha256, destDir)
+}
+
+// MovePhoto moves a file already in the internal library to a new relative path
+// derived from updated date/event information. It updates the library_copies
+// record in the DB after a successful file rename. Empty parent directories
+// (up to 3 levels) are pruned after the move.
+//
+// If the calculated new directory is the same as the current one, no move is
+// performed and the existing relative_path is returned unchanged.
+func MovePhoto(database *sql.DB, lc *db.LibraryCopy, photo *db.Photo, libraryRoot string) (string, error) {
+	// Determine effective date.
+	var capturedAt *time.Time
+	if lc.OverrideDate != nil && *lc.OverrideDate != "" {
+		if t, err := time.Parse(time.RFC3339, *lc.OverrideDate); err == nil {
+			capturedAt = &t
+		}
+	}
+	if capturedAt == nil {
+		capturedAt = photo.CapturedAt
+	}
+
+	newRelDir := buildRelDir(capturedAt, lc.TrueDateUnknown, lc.EventID, database)
+
+	// Extract the directory part of the current relative_path.
+	filename := filepath.Base(lc.RelativePath)
+	currentRelDir := ""
+	if i := strings.LastIndex(lc.RelativePath, "/"); i >= 0 {
+		currentRelDir = lc.RelativePath[:i]
+	}
+
+	// No move needed if directory is unchanged.
+	if newRelDir == currentRelDir {
+		return lc.RelativePath, nil
+	}
+
+	newDestDir := filepath.Join(libraryRoot, newRelDir)
+	if err := os.MkdirAll(newDestDir, 0o755); err != nil {
+		return "", fmt.Errorf("creating destination dir %q: %w", newDestDir, err)
+	}
+
+	newFilename := resolveFilename(filename, photo.SHA256, newDestDir)
+	newRelPath := newRelDir + "/" + newFilename
+	newAbsPath := filepath.Join(newDestDir, newFilename)
+
+	if err := os.Rename(lc.AbsolutePath, newAbsPath); err != nil {
+		return "", fmt.Errorf("moving %q → %q: %w", lc.AbsolutePath, newAbsPath, err)
+	}
+	slog.Info("library: moved photo", "sha256", photo.SHA256[:8], "from", lc.RelativePath, "to", newRelPath)
+
+	if err := db.UpdateLibraryCopy(database, lc.ID, db.LibraryCopyUpdate{
+		RelativePath: &newRelPath,
+		AbsolutePath: &newAbsPath,
+	}); err != nil {
+		return newRelPath, fmt.Errorf("updating library copy paths: %w", err)
+	}
+
+	// Prune empty ancestor dirs (up to 3 levels, stop at library root).
+	pruneEmptyDirs(filepath.Join(libraryRoot, currentRelDir), libraryRoot, 3)
+
+	return newRelPath, nil
+}
+
+// pruneEmptyDirs removes dir if empty, then walks up to maxLevels parent
+// directories doing the same, stopping if a dir equals or is outside root.
+func pruneEmptyDirs(dir, root string, maxLevels int) {
+	for i := 0; i < maxLevels; i++ {
+		// Safety: never remove the library root itself.
+		rel, err := filepath.Rel(root, dir)
+		if err != nil || rel == "." || rel == "" {
+			return
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil || len(entries) > 0 {
+			return
+		}
+		if err := os.Remove(dir); err != nil {
+			return
+		}
+		dir = filepath.Dir(dir)
+	}
 }
 
 // buildRelDir constructs the directory path segment (relative to libraryRoot)

@@ -80,6 +80,8 @@ func (h *Handlers) RegisterRoutes(mux *http.ServeMux, staticFS http.FileSystem) 
 	api("GET", "/api/library/status", h.handleLibraryStatus)
 	api("POST", "/api/library/copy", h.handleLibraryCopyAll)
 	api("POST", "/api/library/copy/{staging_id}", h.handleLibraryCopyOne)
+	api("PATCH", "/api/library/copies/{id}", h.handleLibraryCopyPatch)
+	api("DELETE", "/api/library/copies/{id}", h.handleLibraryCopyDelete)
 
 	// Static assets.
 	static := http.FileServer(staticFS)

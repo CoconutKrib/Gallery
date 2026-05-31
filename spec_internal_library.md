@@ -1,6 +1,6 @@
 # Internal Photo Library — Feature Specification
 
-## Status: Implemented (Phases 6 & 7 complete)
+## Status: Implemented (Phases 6–9 complete)
 
 ### Implementation notes
 
@@ -11,7 +11,23 @@ Phase 6 is fully implemented. The following deviations or clarifications apply:
 - **Scanner exclusion**: `scanner.go` receives a new `isInternalLibraryPath()` method that returns `fs.SkipDir` for any directory that equals or is a subdirectory of `internal_library.path`, preventing the managed copy tree from being inadvertently re-scanned.
 - **Stage button on photo cards**: added to both Browse and Search grids. The button is hidden by CSS until `library-enabled` is set on `<body>`. It calls `Gallery.utils.stagePhoto()` which POSTs to `/api/staging`.
 - **Bulk copy job state**: implemented as a package-level `copyJobStatus` struct in `internal/api/library.go` (not a persistent DB record). The status is in-memory only and is reset on server restart.
-- **`source` column on `photos`**: added by migration `002_internal_library.sql` with `DEFAULT 'scan'`. The dropzone `'dropzone'` value is reserved for Phase 7.
+- **`source` column on `photos`**: added by migration `002_internal_library.sql` with `DEFAULT 'scan'`. The dropzone `'dropzone'` value is set in Phase 7.
+
+Phase 7 (Dropzone) is fully implemented. No spec deviations.
+
+Phase 8 (Library Copy Editing & Re-organisation) is fully implemented. Implementation notes:
+
+- **Double-pointer pattern for PATCH fields**: `LibraryCopyUpdate` uses `**string` / `**int64` fields — outer `nil` means "skip this field"; outer non-nil pointing to a nil `*string` clears the column. This cleanly distinguishes "not sent" from "explicitly set to null".
+- **Re-org on date change**: `handleLibraryCopyPatch` checks whether `override_date` or `true_date_unknown` changed (using `ptrStringChanged`); if so, calls `library.MovePhoto` which recalculates the target directory, moves the file with `os.Rename`, prunes empty ancestor directories up to 3 levels, and updates both `relative_path` and `absolute_path` in the DB.
+- **Empty-directory pruning**: `pruneEmptyDirs(dir, root, maxLevels int)` in `copy.go` walks up the directory tree removing empty directories, stopping at the library root or after `maxLevels` iterations. Parent directory extraction uses `strings.LastIndex` (not a helper from another package).
+- **`BuildRelDir` / `ResolveFilename` exported**: the previously unexported helpers are now also exported for use by the re-org handler; the originals remain as the canonical implementation.
+- **Filter query column aliasing**: `ListLibraryCopiesFiltered` prefixes all selected columns with `lc.` to avoid ambiguity when joining the `photos` table.
+
+Phase 9 (Library Photo Removal) is fully implemented. Implementation notes:
+
+- **Cascade in transaction, file delete after commit**: `DeleteLibraryPhotoByID` wraps steps 1–5 of the cascade in a single transaction and returns the resolved `absPath`. The physical file deletion happens in the HTTP handler after the transaction commits — orphaned files are harmless (scanner skips the library path).
+- **204 No Content handling in `utils.js`**: `Gallery.utils.api()` now short-circuits on `res.status === 204` and returns `null`, preventing a JSON parse error on empty bodies.
+- **Confirmation via native `confirm()`**: the spec calls for a modal; the implementation uses the browser's native `confirm()` dialog to keep the JS footprint small.
 
 ---
 
@@ -330,8 +346,152 @@ The scan manager uses the label `"Dropzone"` for in-progress status reporting wh
 
 ## 10. Open Questions / Future Work
 
-- **Re-organization**: if a user later supplies a date for an `_undated` photo, should Gallery move the file within the internal library or leave it and update the DB path? (Suggested: move the file, update `library_copies.relative_path` and `absolute_path`.) - Yes, sound logic. But in case we need to find these, ensure that our search features allow us to find all photos that have had manual date ovverrides applied. Check we can also find photos by import (e.g. dropzone vs scan), and by tags, or event or description. 
-- **Removal from internal library**: out of scope for Phase 6/7. When implemented: delete the physical file, remove the `library_copies` row; source photo record in `photos` is also deleted - the photo records and file are totally removed from the gallery internal databases and library - it would need a re-scan to reappear in staging.
-- **Export**: bulk export/zip of the internal library is a separate future feature. External library is a pure filesystem structure, so could be copied out directly (the photo metadata, such as event membership or overridden dates, or manually added descriptions, all of which are stored in the sqlite database could be exported as a separate json file and stored alonside this)
+- **Re-organization and post-copy editing**: specced as Phase 8 — see §11.
+- **Removal from internal library**: specced as Phase 9 — see §12.
+- **Export**: bulk export/zip of the internal library is a separate future feature. The internal library is a pure filesystem structure, so could be copied out directly; the photo metadata (event membership, overridden dates, descriptions, tags — all stored in SQLite) could be exported as a separate JSON file stored alongside it.
 - **Multiple event membership**: current model assigns one event per photo; many-to-many is a future schema change.
 - **Dropzone watch mode**: instead of manual scan trigger, inotify/fsnotify watch on the dropzone folder. Out of scope for Phase 7.
+
+---
+
+## 11. Library Copy Management — Editing and Re-organisation (Phase 8)
+
+### 11.1 Motivation
+
+After a photo is copied to the internal library it must remain fully editable: the user may have dated archival photos carefully in staging, or may discover a wrong camera-clock date later. Edits that change the effective date must physically move the file to keep the folder hierarchy consistent with the metadata.
+
+Additionally, the library browse view needs to be queryable by the annotations that make it useful (tags, event, description, source, date-override flag), since the internal library is the primary curated data store rather than the discovery layer.
+
+### 11.2 New Migration (`003_library_copy_metadata.sql`)
+
+```sql
+-- Rich annotations on library copies (carried from staging_queue at copy time;
+-- can be updated post-copy via PATCH /api/library/copies/{id})
+ALTER TABLE library_copies ADD COLUMN title       TEXT;
+ALTER TABLE library_copies ADD COLUMN description TEXT;
+ALTER TABLE library_copies ADD COLUMN override_date TEXT;  -- RFC3339 UTC; when set, drives path placement
+ALTER TABLE library_copies ADD COLUMN event_id    INTEGER REFERENCES events(id);
+
+CREATE INDEX IF NOT EXISTS idx_library_copies_event_id ON library_copies(event_id);
+```
+
+The **copy service** (`internal/library/copy.go`) is updated to carry `title`, `description`, `override_date`, and `event_id` from the `staging_queue` row into the new `library_copies` columns at copy time.
+
+The `true_date_unknown` column already exists on `library_copies` and continues to be carried from staging.
+
+### 11.3 Post-Copy Editing API
+
+#### New endpoint: `PATCH /api/library/copies/{id}`
+
+Accepts a JSON body with any subset of:
+
+| Field | Type | Notes |
+|---|---|---|
+| `title` | string | Free text |
+| `description` | string | Free text, multi-line |
+| `tags` | `[]string` | Replaces existing tags |
+| `event_id` | integer\|null | Assign/clear event |
+| `override_date` | string\|null | RFC3339 UTC; null clears the override |
+| `true_date_unknown` | boolean | Permanent archival flag |
+
+Returns the updated library copy record.
+
+**Re-organisation trigger**: after applying updates, if `override_date` or `true_date_unknown` changed, the handler recalculates the target path using the same priority logic as the copy service (§3.2). If the directory component differs from the current `relative_path`, the file is moved:
+
+1. Create the new destination directory (`os.MkdirAll`).
+2. Apply collision resolution if a different file already exists at the new path (§3.3).
+3. Move the file (`os.Rename`).
+4. Update `library_copies.relative_path` and `library_copies.absolute_path`.
+5. Remove the old parent directory if it is now empty (walk up at most 3 levels, stop at `internal_library.path`).
+
+If the file move fails, the DB is not updated and the handler returns `500`. The operation is atomic from the user's perspective: either both the file and the DB update succeed, or neither does.
+
+#### Staging queue (pre-copy)
+
+Date editing before copy already works via the existing `PATCH /api/staging/{id}` endpoint (`override_date`, `true_date_unknown`). No new staging API is required. The path shown in the staging review UI should preview the calculated destination folder using current annotation values.
+
+### 11.4 Effective Date Resolution
+
+The same rule applies in both the copy service and the re-organisation handler:
+
+```
+if true_date_unknown → _undated/
+else if override_date set → use override_date
+else if photos.captured_at set → use captured_at
+else → _undated/
+```
+
+`true_date_unknown = true` always wins over any date value — it represents a permanent curatorial decision that the capture date cannot be reliably known.
+
+### 11.5 Extended Library Browse Filters
+
+`GET /api/library/photos` gains the following additional query parameters. All are optional and composable.
+
+| Parameter | Type | Behaviour |
+|---|---|---|
+| `source` | `scan` \| `dropzone` | Filters by `photos.source` (JOIN to `photos` on `sha256`) |
+| `has_date_override` | `true` \| `false` | `true` → `library_copies.override_date IS NOT NULL` |
+| `true_date_unknown` | `true` \| `false` | Filters on `library_copies.true_date_unknown` |
+| `tag` | string | Photo must contain this value in `library_copies.tags` JSON array (case-insensitive) |
+| `event_id` | integer | Exact match on `library_copies.event_id` |
+| `q` | string | Keyword search across `title`, `description`, and `filename` (LIKE, case-insensitive) |
+
+These filters are implemented in a new `LibraryCopyFilter` struct in `internal/db/library.go` (or equivalent), keeping them separate from `PhotoFilter` which operates on the `photos` table.
+
+### 11.6 Frontend
+
+The `/library` page gains:
+
+- **Edit panel**: clicking a photo opens a right-hand annotation panel (similar in layout to the staging review panel) showing the current `title`, `description`, `tags`, `event_id`, `override_date`, and `true_date_unknown`. Changes are saved via `PATCH /api/library/copies/{id}`. If the server responds with a moved path, the UI reflects the new folder location.
+- **Filter bar**: the library grid gains filter controls for `source`, `has_date_override`, `true_date_unknown`, `tag`, `event_id`, and keyword `q`, mirroring the controls available on the Search page.
+- **`has_date_override` badge**: photos with `override_date` set display a small "date overridden" badge in the grid and detail view.
+
+---
+
+## 12. Library Photo Removal (Phase 9)
+
+### 12.1 Purpose
+
+Removing a photo from the internal library is a destructive, irreversible operation. It:
+
+- Deletes the physical file from the internal library folder.
+- Removes all Gallery database records for that SHA-256.
+- Leaves the **original source file** untouched (in the scan library or dropzone folder).
+- Means the photo will only reappear in Gallery if the source is rescanned, causing it to be ingested as a new photo and auto-staged (if from the dropzone) or simply visible in discovery again (if from a library path).
+
+### 12.2 Removal API
+
+#### New endpoint: `DELETE /api/library/copies/{id}`
+
+No request body. On success, returns `204 No Content`.
+
+**Cascade order** (SQLite FK constraints are checked; no `ON DELETE CASCADE` is defined, so referencing rows must be deleted explicitly in this order):
+
+1. Resolve `sha256` from `library_copies.photo_sha256` for the given `id`.
+2. Delete from `photo_events` WHERE `photo_id = (SELECT id FROM photos WHERE sha256 = ?)`.
+3. Delete from `staging_queue` WHERE `photo_sha256 = ?`.
+4. Delete from `duplicate_paths` WHERE `sha256 = ?`.
+5. Delete from `library_copies` WHERE `photo_sha256 = ?`.
+6. Delete the physical file at `library_copies.absolute_path`.
+7. Remove the parent directory if empty (walk up at most 3 levels, stop at `internal_library.path`).
+8. Delete from `photos` WHERE `sha256 = ?`.
+
+Steps 2–5 and 8 are wrapped in a single DB transaction. The physical file (step 6) is deleted after the transaction commits. If the file delete fails, the DB changes are **not** rolled back — the record is gone and the orphaned file will be ignored on future scans (not a JPEG at a known library path).
+
+### 12.3 Constraints and Safety
+
+| Constraint | Enforcement |
+|---|---|
+| Requires internal library enabled | Handler returns `409 Conflict` if `internal_library.enabled = false` |
+| Requires confirmation from UI | Frontend shows a confirmation modal before calling DELETE |
+| Original source file is never touched | Only `library_copies.absolute_path` is deleted; source `filepath` in `photos` is not |
+| Idempotent on missing file | If the physical file is already absent, the file-delete step is skipped (log a warning) |
+
+### 12.4 Frontend
+
+The `/library` page gains a **"Remove from Library"** action:
+
+- Available in the photo detail/edit panel (§11.6) as a destructive-styled button.
+- Clicking opens a confirmation modal: _"Remove [filename] from the library? This will delete the copy and all Gallery records for this photo. The original file is not affected."_
+- On confirmation, calls `DELETE /api/library/copies/{id}`.
+- On success, removes the photo from the current grid view and shows a brief toast notification.
