@@ -31,6 +31,10 @@ type EXIFData struct {
 	Width        *int
 	Height       *int
 	Orientation  *int
+
+	// TrueDateUnknown is set by the lenient (dropzone) scanner when captured_at
+	// falls back to file mtime rather than real EXIF date.
+	TrueDateUnknown bool
 }
 
 // Flags returned when EXIF is present but fields are missing.

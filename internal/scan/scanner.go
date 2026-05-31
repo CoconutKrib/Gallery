@@ -17,12 +17,24 @@ import (
 
 // Stats tracks counters for a single scan run.
 type Stats struct {
-	Found     int
-	Skipped   int
-	Ingested  int
-	Duplicate int
-	Errors    int
+	Found      int
+	Skipped    int
+	Ingested   int
+	Duplicate  int
+	Errors     int
+	AutoStaged int // dropzone-only: photos automatically added to staging queue
 }
+
+// ScanMode controls how strictly the scanner filters incoming files.
+type ScanMode string
+
+const (
+	// ScanModeStrict applies camera whitelist and filename filters (normal library scan).
+	ScanModeStrict ScanMode = "strict"
+	// ScanModeLenient skips whitelist and filename filters; allows missing captured_at
+	// (falls back to file mtime and marks the photo as true_date_unknown).
+	ScanModeLenient ScanMode = "lenient"
+)
 
 // Scanner holds scan configuration and dependencies.
 type Scanner struct {
@@ -32,39 +44,58 @@ type Scanner struct {
 	whitelist     []WhitelistEntry
 	includeRe     []*regexp.Regexp
 	excludeRe     []*regexp.Regexp
+	mode          ScanMode // strict (default) or lenient (dropzone)
+	source        string   // 'scan' or 'dropzone'
 	// OnProgress is called after each file decision with current cumulative stats.
 	// Optional; safe to leave nil.
 	OnProgress func(Stats)
 }
 
-// NewScanner creates a Scanner for a single library path.
+// NewScanner creates a strict Scanner for a single library path.
 func NewScanner(cfg *config.Config, db *sql.DB, libraryPathID int64) (*Scanner, error) {
+	return newScannerWithMode(cfg, db, libraryPathID, ScanModeStrict, "scan")
+}
+
+// NewDropzoneScanner creates a lenient Scanner for the dropzone path.
+// It skips the camera whitelist and filename filters, allows photos with no
+// EXIF date (falling back to file mtime), and sets source = 'dropzone' on
+// each newly inserted photo, then auto-stages it in the staging queue.
+func NewDropzoneScanner(cfg *config.Config, db *sql.DB, libraryPathID int64) (*Scanner, error) {
+	return newScannerWithMode(cfg, db, libraryPathID, ScanModeLenient, "dropzone")
+}
+
+func newScannerWithMode(cfg *config.Config, db *sql.DB, libraryPathID int64, mode ScanMode, source string) (*Scanner, error) {
 	s := &Scanner{
 		cfg:           cfg,
 		db:            db,
 		libraryPathID: libraryPathID,
+		mode:          mode,
+		source:        source,
 	}
 
-	// Compile whitelist.
-	for _, e := range cfg.CameraWhitelist {
-		s.whitelist = append(s.whitelist, WhitelistEntry{Make: e.Make, Model: e.Model})
-	}
+	// Only compile whitelist and filename regexes for strict scans.
+	if mode == ScanModeStrict {
+		// Compile whitelist.
+		for _, e := range cfg.CameraWhitelist {
+			s.whitelist = append(s.whitelist, WhitelistEntry{Make: e.Make, Model: e.Model})
+		}
 
-	// Compile filename regexes. Patterns are matched case-insensitively; prepend
-	// (?i) unless the pattern already opens with it.
-	for _, pat := range cfg.FilenameFilters.Include {
-		re, err := regexp.Compile(caseInsensitivePattern(pat))
-		if err != nil {
-			return nil, fmt.Errorf("invalid include pattern %q: %w", pat, err)
+		// Compile filename regexes. Patterns are matched case-insensitively; prepend
+		// (?i) unless the pattern already opens with it.
+		for _, pat := range cfg.FilenameFilters.Include {
+			re, err := regexp.Compile(caseInsensitivePattern(pat))
+			if err != nil {
+				return nil, fmt.Errorf("invalid include pattern %q: %w", pat, err)
+			}
+			s.includeRe = append(s.includeRe, re)
 		}
-		s.includeRe = append(s.includeRe, re)
-	}
-	for _, pat := range cfg.FilenameFilters.Exclude {
-		re, err := regexp.Compile(caseInsensitivePattern(pat))
-		if err != nil {
-			return nil, fmt.Errorf("invalid exclude pattern %q: %w", pat, err)
+		for _, pat := range cfg.FilenameFilters.Exclude {
+			re, err := regexp.Compile(caseInsensitivePattern(pat))
+			if err != nil {
+				return nil, fmt.Errorf("invalid exclude pattern %q: %w", pat, err)
+			}
+			s.excludeRe = append(s.excludeRe, re)
 		}
-		s.excludeRe = append(s.excludeRe, re)
 	}
 
 	return s, nil
@@ -121,7 +152,7 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 		}
 		stats.Found++
 
-		if !s.passesFilenameFilters(d.Name()) {
+		if s.mode == ScanModeStrict && !s.passesFilenameFilters(d.Name()) {
 			stats.Skipped++
 			s.progress(stats)
 			return nil
@@ -134,11 +165,27 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 			s.progress(stats)
 			return nil
 		}
-		// No EXIF or camera not on whitelist — skip silently.
-		if exifData == nil || (len(s.whitelist) > 0 && !exifData.MatchesWhitelist(s.whitelist)) {
-			stats.Skipped++
-			s.progress(stats)
-			return nil
+
+		if s.mode == ScanModeStrict {
+			// No EXIF or camera not on whitelist — skip silently.
+			if exifData == nil || (len(s.whitelist) > 0 && !exifData.MatchesWhitelist(s.whitelist)) {
+				stats.Skipped++
+				s.progress(stats)
+				return nil
+			}
+		} else {
+			// Lenient mode: synthesise an empty EXIFData if the file has no EXIF.
+			if exifData == nil {
+				exifData = &EXIFData{}
+			}
+			// No EXIF date: fall back to file mtime and flag true_date_unknown.
+			if exifData.CapturedAt == nil {
+				if fi, err2 := d.Info(); err2 == nil {
+					mtime := fi.ModTime().UTC()
+					exifData.CapturedAt = &mtime
+				}
+				exifData.TrueDateUnknown = true
+			}
 		}
 
 		hash, err := HashFile(path)
@@ -183,13 +230,38 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 		}
 
 		// New photo — ingest.
-		photo := buildPhotoRecord(exifData, hash, path, d.Name(), s.libraryPathID)
+		photo := buildPhotoRecord(exifData, hash, path, d.Name(), s.libraryPathID, s.source)
 		if _, insertErr := gdb.InsertPhoto(s.db, photo); insertErr != nil {
 			slog.Error("scan insert error", "path", path, "err", insertErr)
 			stats.Errors++
 			return nil
 		}
 		stats.Ingested++
+
+		// Dropzone: auto-stage the newly inserted photo.
+		if s.source == "dropzone" {
+			entry, stageErr := gdb.InsertStagingEntry(s.db, hash)
+			if stageErr != nil {
+				// UNIQUE constraint means already in staging queue — that's fine.
+				if !strings.Contains(stageErr.Error(), "UNIQUE") {
+					slog.Warn("dropzone: auto-stage failed", "sha256", hash[:8], "err", stageErr)
+				}
+				entry = nil
+			}
+			if entry != nil && exifData.TrueDateUnknown {
+				// Mark true_date_unknown on the staging entry.
+				trueDateUnknown := true
+				if updateErr := gdb.UpdateStagingEntry(s.db, entry.ID, gdb.StagingAnnotationUpdate{
+					TrueDateUnknown: &trueDateUnknown,
+				}); updateErr != nil {
+					slog.Warn("dropzone: set true_date_unknown failed", "sha256", hash[:8], "err", updateErr)
+				}
+			}
+			if entry != nil {
+				stats.AutoStaged++
+			}
+		}
+
 		s.progress(stats)
 
 		// Queue thumbnail generation.
@@ -294,7 +366,7 @@ func recordDuplicateIfNew(db *sql.DB, sha256, path string, libraryPathID int64) 
 }
 
 // buildPhotoRecord maps EXIFData + file metadata to a db.Photo ready for insertion.
-func buildPhotoRecord(e *EXIFData, hash, path, filename string, libID int64) *gdb.Photo {
+func buildPhotoRecord(e *EXIFData, hash, path, filename string, libID int64, source string) *gdb.Photo {
 	p := &gdb.Photo{
 		SHA256:        hash,
 		Filepath:      path,
@@ -307,6 +379,7 @@ func buildPhotoRecord(e *EXIFData, hash, path, filename string, libID int64) *gd
 		CameraMake:    e.CameraMake,
 		CameraModel:   e.CameraModel,
 		Flags:         e.Flags(),
+		Source:        source,
 	}
 	if e.CameraSerial != "" {
 		p.CameraSerial = &e.CameraSerial

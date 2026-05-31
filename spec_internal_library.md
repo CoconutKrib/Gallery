@@ -1,6 +1,6 @@
 # Internal Photo Library — Feature Specification
 
-## Status: Implemented (Phase 6 complete; Phase 7 / Dropzone pending)
+## Status: Implemented (Phases 6 & 7 complete)
 
 ### Implementation notes
 
@@ -273,6 +273,13 @@ From the search and browse views, each photo card gains a small **"Stage"** butt
 
 Add **"Staging"** and **"Library"** items to the main nav. Both are hidden when `internal_library.enabled = false`.
 
+### 7.4 Settings page — Dropzone section
+
+The `/settings` page gains a **Dropzone** section (rendered via `dropzoneSectionHtml` in `settings.js`) between the Libraries section and the Camera Whitelist section. It shows:
+- Enabled/disabled badge
+- Configured path
+- **"Scan Dropzone"** button (rendered only when `enabled: true` and path is non-empty); clicking it posts `{source: 'dropzone'}` to `POST /api/scan` and polls scan status with the label `'Dropzone'`
+
 ---
 
 ## 8. Dropzone (Phase 7)
@@ -294,11 +301,17 @@ Photos from the dropzone have `source = 'dropzone'` in the `photos` table.
 
 After a successful dropzone ingest, any newly inserted dropzone photo is automatically inserted into `staging_queue` with `state = 'staged'`. The user then reviews them in the Staging page.
 
-If a dropzone photo has no usable date (no EXIF, no file mtime is trusted), `true_date_unknown = 1` is set on the staging entry automatically.
+If a dropzone photo has no EXIF date, `true_date_unknown = 1` is set on the staging entry automatically. File mtime is still used as the path-placement date (so the photo lands in the correct year/month folder), but the photo is permanently flagged because the exact capture date cannot be known. In other words: `true_date_unknown` is set whenever EXIF date is absent, regardless of whether the mtime fallback succeeded.
+
+**Idempotency on rescan**: if a dropzone photo is rescanned while it is already in the staging queue, the UNIQUE constraint on `staging_queue.photo_sha256` prevents a duplicate entry. The duplicate insertion error is silently swallowed and `stats.AutoStaged` is not incremented again.
 
 ### 8.3 Scan Trigger
 
-The existing `/api/scan` endpoint accepts an optional `{"source": "dropzone"}` body to trigger a dropzone-only scan. Without this, a normal scan runs library paths only. Running a full scan runs both.
+The existing `/api/scan` endpoint accepts an optional `{"source": "dropzone"}` body to trigger a dropzone-only scan. Without this field, a normal scan runs library paths only.
+
+> **Implementation note**: there is no combined "scan all" mode that runs both library paths and the dropzone in one request. The two scan types are always triggered independently. A dropzone scan must always be requested explicitly with `{"source": "dropzone"}`.
+
+The scan manager uses the label `"Dropzone"` for in-progress status reporting while a dropzone scan is running. Re-clustering is triggered after a dropzone scan only when `stats.Ingested > 0` (same as for library scans).
 
 ---
 
@@ -317,7 +330,7 @@ The existing `/api/scan` endpoint accepts an optional `{"source": "dropzone"}` b
 
 ## 10. Open Questions / Future Work
 
-- **Re-organization**: if a user later supplies a date for an `_undated` photo, should Gallery move the file within the internal library or leave it and update the DB path? (Suggested: move the file, update `library_copies.relative_path` and `absolute_path`.)
+- **Re-organization**: if a user later supplies a date for an `_undated` photo, should Gallery move the file within the internal library or leave it and update the DB path? (Suggested: move the file, update `library_copies.relative_path` and `absolute_path`.) - Yes, sound logic. But in case we need to find these, ensure that our search features allow us to find all photos that have had manual date ovverrides applied. Check we can also find photos by import (e.g. dropzone vs scan), and by tags, or event or description. 
 - **Removal from internal library**: out of scope for Phase 6/7. When implemented: delete the physical file, remove the `library_copies` row; source photo record in `photos` is also deleted - the photo records and file are totally removed from the gallery internal databases and library - it would need a re-scan to reappear in staging.
 - **Export**: bulk export/zip of the internal library is a separate future feature. External library is a pure filesystem structure, so could be copied out directly (the photo metadata, such as event membership or overridden dates, or manually added descriptions, all of which are stored in the sqlite database could be exported as a separate json file and stored alonside this)
 - **Multiple event membership**: current model assigns one event per photo; many-to-many is a future schema change.

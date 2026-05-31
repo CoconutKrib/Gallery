@@ -55,6 +55,24 @@ Gallery.pages.settings = async function () {
     </div>`
   ).join('') || `<div class="settings-row"><span style="color:var(--muted)">No scans yet</span></div>`;
 
+  // ── Dropzone section ─────────────────────────────────────────────────────
+  const dropzoneSectionHtml = (() => {
+    const dz = settings.dropzone;
+    if (!dz) return '';
+    const enabledBadge = dz.enabled
+      ? `<span class="pill pill-ok">enabled</span>`
+      : `<span class="pill pill-warn">disabled</span>`;
+    const scanBtnHtml = dz.enabled && dz.path
+      ? `<button class="scan-btn" onclick="Gallery.settings.triggerDropzoneScan(this)">Scan Dropzone</button>
+         <span id="scan-dropzone-status" class="scan-status"></span>`
+      : '';
+    return `<div class="settings-section">
+      <h2>Dropzone ${enabledBadge}</h2>
+      <div class="settings-row"><span class="label">Path</span><span class="value">${esc(dz.path || '—')}</span></div>
+      ${scanBtnHtml ? `<div style="margin-top:12px">${scanBtnHtml}</div>` : ''}
+    </div>`;
+  })();
+
   app.innerHTML = `<div class="settings-page">
     <h1>Settings</h1>
 
@@ -66,6 +84,8 @@ Gallery.pages.settings = async function () {
         <span id="scan-all-status" class="scan-status"></span>
       </div>
     </div>
+
+    ${dropzoneSectionHtml}
 
     <div class="settings-section" id="section-whitelist">
       <h2>Camera Whitelist
@@ -312,6 +332,23 @@ Gallery.settings = {
     try {
       await Gallery.utils.api('/api/scan', { method: 'POST', body: '{}', headers: { 'Content-Type': 'application/json' } });
       Gallery.settings.pollScanStatus(label, statusEl, btn);
+    } catch (err) {
+      if (statusEl) statusEl.textContent = 'Error: ' + err.message;
+      btn.disabled = false;
+    }
+  },
+
+  async triggerDropzoneScan(btn) {
+    btn.disabled = true;
+    const statusEl = document.getElementById('scan-dropzone-status');
+    if (statusEl) statusEl.textContent = 'Starting dropzone scan…';
+    try {
+      await Gallery.utils.api('/api/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: 'dropzone' }),
+      });
+      Gallery.settings.pollScanStatus('Dropzone', statusEl, btn);
     } catch (err) {
       if (statusEl) statusEl.textContent = 'Error: ' + err.message;
       btn.disabled = false;

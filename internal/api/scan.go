@@ -93,13 +93,37 @@ func (sm *ScanManager) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 type scanTriggerRequest struct {
-	LibraryPathID *int64 `json:"library_path_id"` // nil = scan all
+	LibraryPathID *int64  `json:"library_path_id"` // nil = scan all library paths
+	Source        *string `json:"source"`          // "dropzone" to scan the dropzone instead
 }
 
 func (sm *ScanManager) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	var req scanTriggerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
 		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Dropzone scan — handled separately.
+	if req.Source != nil && *req.Source == "dropzone" {
+		if !sm.cfg.Dropzone.Enabled || sm.cfg.Dropzone.Path == "" {
+			writeError(w, http.StatusConflict, "dropzone not enabled")
+			return
+		}
+		sm.mu.Lock()
+		if sm.running {
+			sm.mu.Unlock()
+			writeError(w, http.StatusConflict, "scan already running")
+			return
+		}
+		sm.running = true
+		sm.liveStats = scan.Stats{}
+		now := time.Now()
+		sm.startedAt = &now
+		sm.mu.Unlock()
+
+		go sm.runDropzoneScan()
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "dropzone scan started"})
 		return
 	}
 
@@ -138,6 +162,62 @@ func (sm *ScanManager) handleTrigger(w http.ResponseWriter, r *http.Request) {
 
 	go sm.runScans(paths)
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "scan started"})
+}
+
+func (sm *ScanManager) runDropzoneScan() {
+	defer func() {
+		sm.mu.Lock()
+		sm.running = false
+		sm.label = ""
+		sm.startedAt = nil
+		sm.mu.Unlock()
+	}()
+
+	dzPath := sm.cfg.Dropzone.Path
+	lpID, err := db.UpsertLibraryPath(sm.database, dzPath, "Dropzone")
+	if err != nil {
+		slog.Error("dropzone: upsert library path failed", "path", dzPath, "err", err)
+		return
+	}
+
+	sm.mu.Lock()
+	sm.label = "Dropzone"
+	sm.liveStats = scan.Stats{}
+	sm.mu.Unlock()
+
+	scanner, err := scan.NewDropzoneScanner(sm.cfg, sm.database, lpID)
+	if err != nil {
+		slog.Error("dropzone: creating scanner failed", "err", err)
+		return
+	}
+	scanner.OnProgress = func(stats scan.Stats) {
+		sm.mu.Lock()
+		sm.liveStats = stats
+		sm.mu.Unlock()
+	}
+
+	slog.Info("dropzone: scan starting", "path", dzPath)
+	stats, err := scanner.Run(dzPath)
+	if err != nil {
+		slog.Error("dropzone: scan failed", "path", dzPath, "err", err)
+	}
+	slog.Info("dropzone: scan done",
+		"path", dzPath,
+		"found", stats.Found, "skipped", stats.Skipped,
+		"ingested", stats.Ingested, "duplicate", stats.Duplicate,
+		"auto_staged", stats.AutoStaged, "errors", stats.Errors)
+
+	// Re-cluster so newly ingested photos are grouped.
+	if stats.Ingested > 0 {
+		gapDays := sm.cfg.EventGapDays
+		geoKm := sm.cfg.EventGeoKm
+		slog.Info("cluster: running after dropzone scan", "gap_days", gapDays, "geo_km", geoKm)
+		if err := cluster.Run(sm.database, gapDays, geoKm); err != nil {
+			slog.Error("cluster: failed", "err", err)
+		} else {
+			slog.Info("cluster: done")
+		}
+	}
 }
 
 func (sm *ScanManager) runScans(paths []config.LibraryPath) {
