@@ -5,26 +5,34 @@
 Allow users to tag which people appear in photos in the internal library. In the
 interim, tagging is entirely manual — presence-only or with an optional drawn
 bounding box. In a later phase, automated face detection and recognition can be
-enabled as a compile-time-optional feature, requiring no GPU or network access,
-but needing the onnxruntime C library to be installed.
+enabled at runtime: a single binary runs on any machine, and the heavier AI
+features are activated only when the onnxruntime shared library and model files
+are present. No separate "AI build" is required.
 
 **Non-goals:**
 - Facial recognition as a hard dependency (the app must work fully without it)
 - Tagging people in scan-library photos (people are library-scoped — only `library_copies`)
 - Cloud-based facial recognition services
+- Shipping or downloading model weights (operator responsibility)
 
 ---
 
 ## Deployment Phases
 
-| Phase | What ships | Recognition dependency |
+| Phase | What ships | Runtime requirement |
 |---|---|---|
-| **A — Manual tagging** | `people` table, extended `faces`, full CRUD API, tagging UI on library photo detail, `/people` browse page | None — pure Go, no CGO |
-| **B — Face detection** | Auto-populate `faces` rows with bounding boxes during scan; user confirms/removes and assigns people | pigo (pure Go) or onnxruntime-go (CGO, build tag `facerecog`) |
-| **C — Face recognition** | Embedding extraction, identity clustering, suggestion pipeline, review UI | onnxruntime-go (CGO, build tag `facerecog`) |
+| **A — Manual tagging** | `people` table, extended `faces`, full CRUD API, tagging UI on library photo detail, `/people` browse page | None — no extra libraries or models needed |
+| **B — Face detection** | Auto-populate `faces` rows with bounding boxes during scan; user confirms/removes and assigns people | `libonnxruntime.so` + SCRFD detection model |
+| **C — Face recognition** | Embedding extraction, identity clustering, suggestion pipeline, review UI | `libonnxruntime.so` + SCRFD detection model + ArcFace embedding model |
 
-The build tag `facerecog` gates all CGO code. `go build ./...` (no tags) must always
-succeed and produce a fully functional binary for Phases A and below.
+**Single binary:** there is only one build target — `go build ./...`. The
+`internal/recognition` package is always compiled in (it requires CGO, so a C
+compiler must be present on the build machine, but `libonnxruntime` does **not**
+need to be installed at compile time). At runtime, `recognition.Init(cfg)` attempts
+to dynamically load the shared library via `SetSharedLibraryPath`. If this fails
+(library not found, models missing, etc.) the server starts normally and face
+recognition features are marked unavailable. Manual tagging (Phase A) is always
+fully functional regardless.
 
 ---
 
@@ -137,6 +145,7 @@ Add to `config.json` and `internal/config/config.go`:
 ```json
 "face_recognition": {
   "enabled": false,
+  "onnxruntime_lib": "/usr/lib/libonnxruntime.so",
   "model_dir": "",
   "detection_model": "scrfd_10g_bnkps.onnx",
   "recognition_model": "w600k_r50.onnx",
@@ -149,6 +158,7 @@ Add to `config.json` and `internal/config/config.go`:
 ```go
 type FaceRecognitionConfig struct {
     Enabled              bool    `json:"enabled"`
+    OnnxruntimeLib       string  `json:"onnxruntime_lib"`       // path to libonnxruntime.so/.dylib/.dll
     ModelDir             string  `json:"model_dir"`
     DetectionModel       string  `json:"detection_model"`
     RecognitionModel     string  `json:"recognition_model"`
@@ -158,13 +168,13 @@ type FaceRecognitionConfig struct {
 }
 ```
 
-`config.Validate()` must check when `enabled = true`:
-- `model_dir` is non-empty and the directory exists
-- both model files exist within `model_dir`
-- `recognition_threshold` is in the range 0.0–1.0
+`config.Validate()` does **not** check for model files — validation of the
+recognition runtime is deferred to `recognition.Init()` at startup (so the server
+can still start even if the library is absent). The only hard check at validate
+time is that `recognition_threshold` is in 0.0–1.0 when `enabled = true`.
 
-When `enabled = false`, the entire `face_recognition` block is ignored at
-runtime.
+When `enabled = false` the entire `face_recognition` block is skipped; `Init()`
+is never called and no CGO is invoked at startup.
 
 ---
 
@@ -194,9 +204,38 @@ All people/face endpoints are behind the existing auth middleware. They return
 | `DELETE` | `/api/faces/{id}` | Remove a face tag. 404 if not found. |
 | `PATCH` | `/api/faces/{id}` | Update `person_id`, bbox coords, or `verified`. Used to confirm or reassign auto-detected faces. |
 
-### Recognition (Phase C, gated on `face_recognition.enabled`)
+### Recognition status
 
-All endpoints below return `501 Not Implemented` when `enabled = false`.
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/recognition/status` | Returns current capability state. Always succeeds (200). See response shape below. |
+
+Response:
+
+```json
+{
+  "enabled": true,
+  "available": false,
+  "execution_provider": null,
+  "reason": "libonnxruntime not found at /usr/lib/libonnxruntime.so"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `enabled` | bool | `face_recognition.enabled` from config — user intent |
+| `available` | bool | runtime init succeeded; library + models loaded successfully |
+| `execution_provider` | string\|null | `"CUDA"`, `"CPU"`, or `null` when unavailable |
+| `reason` | string\|null | Human-readable explanation when `available = false`, null otherwise |
+
+The frontend reads this endpoint at startup and uses it to drive the three UI states
+described in the Frontend section below.
+
+### Recognition (Phase B/C, gated on `enabled AND available`)
+
+All endpoints below return:
+- `501 Not Implemented` when `enabled = false` (user has not turned it on)
+- `503 Service Unavailable` with `{"reason": "..."}` when `enabled = true` but `available = false` (library/models missing)
 
 | Method | Path | Description |
 |---|---|---|
@@ -270,19 +309,39 @@ Exported functions:
 
 ### `internal/recognition/` (new)
 
-All files in this package use the `facerecog` build tag except `stub.go`.
+No build tags. The package is always compiled in. It uses CGO via
+`github.com/yalue/onnxruntime_go`, which dynamically loads `libonnxruntime` at
+runtime rather than linking it at compile time — so the build machine only needs
+a C compiler (standard on Linux/macOS), not the onnxruntime library itself.
 
-| File | Build tag | Purpose |
-|---|---|---|
-| `detect.go` | `facerecog` | Load SCRFD ONNX model via onnxruntime-go; run detection on a decoded image; return `[]Detection{BboxX, BboxY, BboxW, BboxH, Confidence}` |
-| `embed.go` | `facerecog` | Load ArcFace/R50 ONNX model; crop + align face from bounding box; return `[]float32` embedding (512-dim) |
-| `cluster.go` | `facerecog` | Cosine similarity matrix + single-linkage agglomerative clustering; return `[]FaceCluster` |
-| `suggest.go` | `facerecog` | For each unidentified face, compute cosine distance to per-person mean embeddings; emit `Suggestion{FaceID, PersonID, Score}` above threshold |
-| `stub.go` | `!facerecog` | No-op stubs for all exported functions so the codebase compiles without onnxruntime |
+| File | Purpose |
+|---|---|
+| `recognition.go` | `Status` struct; `Init(cfg) Status`; `IsAvailable() bool`; package-level singleton |
+| `detect.go` | Load SCRFD ONNX session; `Detect(img) ([]Detection, error)` |
+| `embed.go` | Load ArcFace/R50 ONNX session; `Embed(img, Detection) ([]float32, error)` |
+| `cluster.go` | Pure Go — cosine similarity matrix + agglomerative clustering; no CGO; `Cluster(faces []FaceEmbedding) []FaceCluster` |
+| `suggest.go` | Pure Go — `Suggest(unidentified, personMeans []FaceEmbedding, threshold float64) []Suggestion` |
 
-The stub file exports the same function signatures returning zero values and a
-descriptive `errors.New("face recognition not compiled in")` error. Callers in
-`scanner.go` and `scan.go` check this error and skip silently.
+`Init(cfg FaceRecognitionConfig) Status` is called once at server startup:
+
+```go
+type Status struct {
+    Available         bool
+    ExecutionProvider string  // "CUDA", "CPU", or ""
+    Reason            string  // non-empty when Available == false
+}
+```
+
+Init sequence:
+1. Call `onnxruntime.SetSharedLibraryPath(cfg.OnnxruntimeLib)` + `onnxruntime.InitializeEnvironment()` → if either fails, return `Status{Available: false, Reason: err.Error()}`
+2. Try to create a CUDA session options object → if it succeeds, set `ExecutionProvider = "CUDA"`; otherwise fall back to CPU and set `ExecutionProvider = "CPU"` with a log warning
+3. Load SCRFD model from `cfg.ModelDir/cfg.DetectionModel` → if missing or invalid, return unavailable with reason
+4. If recognition model path is configured, load ArcFace model → if missing, detection-only mode (Phase B); log at Info level
+5. Return `Status{Available: true, ExecutionProvider: ...}`
+
+The returned `Status` is stored in the `Handlers` struct and served by
+`GET /api/recognition/status`. Callers in `scanner.go` and `scan.go` check
+`recognition.IsAvailable()` before invoking any inference.
 
 ### `internal/api/people.go` (new)
 
@@ -308,18 +367,21 @@ POST /api/faces/{id}/reject              handleRejectFace
 POST /api/faces/cluster                  handleTriggerCluster
 ```
 
-All recognition handlers (`handleUnidentifiedFaces` onwards) return
-`501 Not Implemented` when `cfg.FaceRecognition.Enabled == false`.
+Recognition handlers (`handleUnidentifiedFaces` onwards) return `501` when
+`Enabled == false` and `503` when `Enabled == true` but `Available == false`.
+`handleRecognitionStatus` always returns 200.
 
 ### Changes to existing files
 
 | File | Change |
 |---|---|
-| `internal/config/config.go` | Add `FaceRecognitionConfig` field; extend `Validate()` |
-| `internal/api/router.go` | Register new routes from `people.go` |
-| `internal/scan/scanner.go` | After thumbnail: if `faceRecog.Enabled`, call `recognition.Detect` + `recognition.Embed`, persist results via `db.InsertFace` |
-| `internal/api/scan.go` | After `cluster.Run`: call `recognition.SuggestIdentities(db, cfg)` and `recognition.ClusterUnidentified(db, cfg)` when enabled |
-| `web/js/app.js` | Register `/people` and `/people/:id` routes; add `people-enabled` (or reuse `library-enabled`) body class |
+| `internal/config/config.go` | Add `FaceRecognitionConfig` field (incl. `OnnxruntimeLib`); lighten `Validate()` |
+| `internal/api/router.go` | Register new routes from `people.go`; pass recognition `Status` into `Handlers` |
+| `internal/api/settings.go` | Add `handleRecognitionStatus` |
+| `internal/scan/scanner.go` | After thumbnail: if `recognition.IsAvailable()`, call `Detect` + `Embed`, persist via `db.InsertFace` |
+| `internal/api/scan.go` | After `cluster.Run`: call suggest + cluster when `IsAvailable()` |
+| `main.go` | Call `recognition.Init(cfg)` after config load; pass `Status` into `api.NewHandlers(...)` |
+| `web/js/app.js` | Register `/people` and `/people/:id` routes; fetch recognition status at boot |
 | `web/js/library.js` | Add "People" section to the library copy edit panel |
 | `web/index.html` | Nav link for People (CSS-gated by `library-enabled`) |
 
@@ -399,8 +461,13 @@ the AdaFace MIT-licensed models) should be substituted.
 | **InsightFace python-package** | Python | — | MIT (code) / non-commercial (models) | Full pipeline | Python runtime required; model licence restriction. |
 | **CompreFace** | Docker sidecar | — | Apache 2.0 | REST API, full pipeline | Adds ops complexity (Docker required); no CGO. |
 
-**Decision:** onnxruntime-go, behind build tag `facerecog`. The `!facerecog` stub
-ensures the standard single-binary build has zero extra dependencies.
+**Decision:** `github.com/yalue/onnxruntime_go`. This library loads
+`libonnxruntime` at runtime via `SetSharedLibraryPath` — the shared library is
+not required at compile time, only at runtime. A single binary covers all
+deployment scenarios. The build machine requires a C compiler (CGO) but not the
+nxruntime library or headers. GPU acceleration is selected automatically at
+runtime via the CUDA execution provider if available, falling back to CPU with a
+warning.
 
 ---
 
@@ -433,7 +500,23 @@ ensures the standard single-binary build has zero extra dependencies.
   without this; the API already accepts nullable bbox)
 - Remove button on each tag
 
-### Recognition review page: `/faces/review` (Phase C, only shown when `enabled`)
+### Recognition feature states in the UI
+
+The frontend calls `GET /api/recognition/status` at boot and stores the result.
+Every recognition-related UI element observes these three states:
+
+| State | `enabled` | `available` | UI presentation |
+|---|---|---|---|
+| **Off** | false | any | Toggle switch shown but off; click to enable in config |
+| **Unavailable** | true | false | Toggle shown as disabled/greyed-out; tooltip shows `reason` (e.g. "libonnxruntime not found") |
+| **Active — GPU** | true | true, CUDA | Normal; no warning |
+| **Active — CPU** | true | true, CPU | Active but with an amber badge: "Running on CPU — may be slow for large libraries" |
+
+The recognition toggle lives in the Settings page (alongside existing scan
+configuration). The People browse and tagging UI is always available regardless
+of recognition state — manual tagging works in all states.
+
+### Recognition review page: `/faces/review` (Phase C, only shown when `enabled AND available`)
 
 - Two-panel layout
 - Left: unidentified face clusters (grouped by similarity cluster); each cluster
@@ -441,19 +524,30 @@ ensures the standard single-binary build has zero extra dependencies.
 - Right: suggested matches (auto-assigned but unverified); each card shows the
   face crop, the suggested name, and Confirm / Not this person buttons
 - Batch confirm button for a whole cluster
+- When `execution_provider = "CPU"`, a persistent banner: "Face recognition is
+  running on CPU. Processing may be slow — consider installing CUDA for
+  GPU acceleration."
 
 ---
 
 ## Verification Steps
 
-1. `go build ./...` — succeeds with no face recognition dependency
-2. Apply migration, run `go run . --config test_config.json --scan` — no crash;
-   `SELECT count(*) FROM faces` = 0 (no auto-detection in standard build)
-3. `POST /api/people {"name":"Alice"}` → 201; `GET /api/people` → `[{id:1, name:"Alice", photo_count:0}]`
-4. `POST /api/library/copies/{id}/faces {"person_id":1}` → 201
-5. `GET /api/library/copies/{id}/faces` → face row with `bbox_x=null`, `verified=1`
-6. `GET /api/people/1/photos` → photo appears
-7. `DELETE /api/people/1` → 204; face row persists with `person_id=null`
-8. `GET /api/faces/unidentified` → 501 (recognition not enabled)
-9. *(Phase C)* `go build -tags facerecog ./...` with onnxruntime installed → succeeds
-10. *(Phase C)* Scan with `face_recognition.enabled = true` → `faces` rows populated with bbox + embedding; `GET /api/faces/unidentified` returns results
+1. `go build ./...` on a machine with a C compiler but **without** libonnxruntime — succeeds
+2. Start server with `face_recognition.enabled = false` →
+   `GET /api/recognition/status` returns `{"enabled":false,"available":false,"reason":null}`
+3. Start server with `enabled = true` but bad `onnxruntime_lib` path →
+   `GET /api/recognition/status` returns `{"enabled":true,"available":false,"reason":"...not found..."}`;
+   server starts normally; manual tagging fully operational
+4. Apply migration, run `go run . --config test_config.json --scan` — no crash;
+   `SELECT count(*) FROM faces` = 0 (no auto-detection without onnxruntime)
+5. `POST /api/people {"name":"Alice"}` → 201; `GET /api/people` → `[{id:1, name:"Alice", photo_count:0}]`
+6. `POST /api/library/copies/{id}/faces {"person_id":1}` → 201
+7. `GET /api/library/copies/{id}/faces` → face row with `bbox_x=null`, `verified=1`
+8. `GET /api/people/1/photos` → photo appears
+9. `DELETE /api/people/1` → 204; face row persists with `person_id=null`
+10. `GET /api/faces/unidentified` → 501 (`enabled=false`)
+11. `enabled=true` + bad lib path → `GET /api/faces/unidentified` → 503 with `{"reason":"..."}`
+12. *(Phase B/C)* With libonnxruntime installed + models present →
+    `GET /api/recognition/status` returns `{"enabled":true,"available":true,"execution_provider":"CUDA"}` (or `"CPU"`)
+13. *(Phase B/C)* Scan runs → `faces` rows populated with bbox + embedding;
+    `GET /api/faces/unidentified` returns results
