@@ -50,6 +50,7 @@ func (h *Handlers) RegisterRoutes(mux *http.ServeMux, staticFS http.FileSystem) 
 
 	api("GET", "/api/libraries", h.handleLibraries)
 	api("GET", "/api/photos", h.handlePhotos)
+	api("GET", "/api/search/facets", h.handleSearchFacets)
 	api("GET", "/api/photos/{sha256}", h.handlePhotoDetail)
 	api("GET", "/api/photos/{sha256}/image", h.handlePhotoImage)
 	api("GET", "/api/photos/{sha256}/thumbnail", h.handlePhotoThumbnail)

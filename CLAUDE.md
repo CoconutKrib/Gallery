@@ -22,6 +22,13 @@ go run . --config test_config.json          # listens on :8080
 go run . --config test_config.json --scan
 ```
 
+## Testing guidance
+
+- The authoritative test strategy and expansion plan is documented in `spec_test_suite.md`.
+- When implementing a major feature or behavior change, add or update unit tests in the same PR whenever practical.
+- Keep unit tests fast and deterministic; reserve filesystem-heavy or end-to-end behavior for integration tests.
+- Prefer asserting observable contracts (status codes, payload shape, DB side effects) over internal implementation details.
+
 ## Tech stack
 
 | Layer | Choice |
