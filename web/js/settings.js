@@ -41,12 +41,20 @@ Gallery.pages.settings = async function () {
   const internalLibraryHtml = `<div class="settings-section" id="section-internal-library">
     <h2>Internal Library</h2>
     <div class="settings-row">
-      <span class="label">Status</span>
-      <span class="value">${il.enabled ? '<span class="pill pill-ok">enabled</span>' : '<span class="pill pill-warn">disabled</span>'}</span>
+      <span class="label">Enabled</span>
+      <input type="checkbox" id="il-enabled" ${il.enabled ? 'checked' : ''} />
     </div>
     <div class="settings-row">
       <span class="label">Path</span>
-      <span class="value">${esc(il.path || '—')}</span>
+      <input class="settings-input" type="text" id="il-path"
+             value="${esc(il.path || '')}" placeholder="/path/to/internal-library" />
+    </div>
+    <div class="settings-row settings-note-row">
+      <span class="value">Only one internal library path is supported at a time.</span>
+    </div>
+    <div class="settings-save-row">
+      <button class="scan-btn" onclick="Gallery.settings.saveInternalLibrary(this)">Save Internal Library</button>
+      <span id="il-status" class="scan-status"></span>
     </div>
   </div>`;
 
@@ -236,10 +244,12 @@ Gallery.pages.settings = async function () {
         <input id="sp-path" class="settings-input" placeholder="Path (e.g. /home/you/Pictures)" />
         <button class="settings-add-btn" onclick="Gallery.settings.scanPathAdd()">Add</button>
       </div>
+      <div class="scan-status">Tip: Press Enter in either field to add quickly.</div>
       <div class="settings-save-row">
         <button class="scan-btn" onclick="Gallery.settings.saveScanPaths(this)">Save Scan Directories</button>
         <span id="sp-status" class="scan-status"></span>
       </div>
+      <div id="path-conflict-warning" class="settings-warning" style="display:none"></div>
       <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
         <button class="scan-btn" onclick="Gallery.settings.triggerScanAll(this)">Scan All Directories</button>
         <span id="scan-all-status" class="scan-status"></span>
@@ -311,6 +321,9 @@ Gallery.pages.settings = async function () {
 
   Gallery.settings.renderWhitelist();
   Gallery.settings.renderScanPaths(scanStatus.last_runs || []);
+  Gallery.settings.setupScanPathInputs();
+  Gallery.settings.setupInternalLibraryInputs();
+  Gallery.settings.updatePathConflictWarnings();
   Gallery.settings.renderFilters();
   Gallery.settings.loadRecognitionStatus();
 };
@@ -346,10 +359,69 @@ Gallery.settings = {
                placeholder="Label" onchange="Gallery.settings.scanPathUpdate(${i}, 'label', this.value)" />
         <input class="settings-input" value="${Gallery.utils.esc(sp.path || '')}"
                placeholder="Path" onchange="Gallery.settings.scanPathUpdate(${i}, 'path', this.value)" />
-        <button class="settings-del-btn" onclick="Gallery.settings.scanPathRemove(${i})" title="Remove">✕</button>
+        <button class="settings-del-btn" onclick="Gallery.settings.scanPathRemove(${i})" title="Remove">Remove</button>
       </div>
       <div class="scan-status">${Gallery.utils.esc(lastScan)}</div>`;
     }).join('');
+  },
+
+  setupScanPathInputs() {
+    const addOnEnter = (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        this.scanPathAdd();
+      }
+    };
+    const labelEl = document.getElementById('sp-label');
+    const pathEl = document.getElementById('sp-path');
+    if (labelEl) labelEl.addEventListener('keydown', addOnEnter);
+    if (pathEl) pathEl.addEventListener('keydown', addOnEnter);
+  },
+
+  setupInternalLibraryInputs() {
+    const ilPathEl = document.getElementById('il-path');
+    const ilEnabledEl = document.getElementById('il-enabled');
+    if (ilPathEl) ilPathEl.addEventListener('input', () => this.updatePathConflictWarnings());
+    if (ilEnabledEl) ilEnabledEl.addEventListener('change', () => this.updatePathConflictWarnings());
+  },
+
+  pathsOverlap(a, b) {
+    const norm = (p) => {
+      let x = (p || '').trim();
+      if (!x) return '';
+      x = x.replace(/\\/g, '/');
+      x = x.replace(/\/+$/, '');
+      return x.toLowerCase();
+    };
+    const na = norm(a);
+    const nb = norm(b);
+    if (!na || !nb) return false;
+    return na === nb || na.startsWith(nb + '/') || nb.startsWith(na + '/');
+  },
+
+  updatePathConflictWarnings() {
+    const warnEl = document.getElementById('path-conflict-warning');
+    if (!warnEl) return;
+    const ilEnabledEl = document.getElementById('il-enabled');
+    const ilPathEl = document.getElementById('il-path');
+    const ilEnabled = !!(ilEnabledEl && ilEnabledEl.checked);
+    const ilPath = (ilPathEl && ilPathEl.value) ? ilPathEl.value.trim() : '';
+    if (!ilEnabled || !ilPath) {
+      warnEl.style.display = 'none';
+      warnEl.textContent = '';
+      return;
+    }
+
+    const conflicts = this._scanPaths.filter(sp => this.pathsOverlap(sp.path, ilPath));
+    if (conflicts.length === 0) {
+      warnEl.style.display = 'none';
+      warnEl.textContent = '';
+      return;
+    }
+
+    const labels = conflicts.map(sp => (sp.label || sp.path || '').trim() || '(unnamed)');
+    warnEl.style.display = 'block';
+    warnEl.textContent = `Path conflict: internal library overlaps scan path(s): ${labels.join(', ')}. Save will fail until paths do not overlap.`;
   },
 
   scanPathAdd() {
@@ -361,20 +433,30 @@ Gallery.settings = {
       pathEl.focus();
       return;
     }
+    const dupPath = this._scanPaths.some(sp => (sp.path || '').trim().toLowerCase() === path.toLowerCase());
+    if (dupPath) {
+      pathEl.focus();
+      pathEl.select();
+      return;
+    }
     this._scanPaths.push({ label, path });
     labelEl.value = '';
     pathEl.value = '';
+    labelEl.focus();
     this.renderScanPaths();
+    this.updatePathConflictWarnings();
   },
 
   scanPathUpdate(i, field, value) {
     if (!this._scanPaths[i]) return;
     this._scanPaths[i][field] = (value || '').trim();
+    if (field === 'path') this.updatePathConflictWarnings();
   },
 
   scanPathRemove(i) {
     this._scanPaths.splice(i, 1);
     this.renderScanPaths();
+    this.updatePathConflictWarnings();
   },
 
   async saveScanPaths(btn) {
@@ -385,14 +467,48 @@ Gallery.settings = {
       const cleaned = this._scanPaths
         .map(sp => ({ label: (sp.label || '').trim(), path: (sp.path || '').trim() }))
         .filter(sp => sp.path !== '');
+      const seen = new Set();
+      const deduped = [];
+      for (const sp of cleaned) {
+        const key = sp.path.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(sp);
+      }
       await Gallery.utils.api('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scan_paths: cleaned }),
+        body: JSON.stringify({ scan_paths: deduped }),
       });
-      this._scanPaths = cleaned;
+      this._scanPaths = deduped;
       this.renderScanPaths();
       statusEl.textContent = 'Saved.';
+    } catch (err) {
+      statusEl.textContent = 'Error: ' + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  },
+
+  async saveInternalLibrary(btn) {
+    btn.disabled = true;
+    const statusEl = document.getElementById('il-status');
+    statusEl.textContent = 'Saving…';
+    try {
+      const enabled = document.getElementById('il-enabled').checked;
+      const path = (document.getElementById('il-path').value || '').trim();
+      await Gallery.utils.api('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          internal_library: {
+            enabled,
+            path,
+          },
+        }),
+      });
+      statusEl.textContent = 'Saved.';
+      this.updatePathConflictWarnings();
     } catch (err) {
       statusEl.textContent = 'Error: ' + err.message;
     } finally {

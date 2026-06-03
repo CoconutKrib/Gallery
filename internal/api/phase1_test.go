@@ -175,6 +175,22 @@ func TestHandlePostSettings_PartialUpdateAndValidation(t *testing.T) {
 			t.Fatalf("login status mismatch: got %d want %d", loginResp.Code, http.StatusOK)
 		}
 	})
+
+	t.Run("invalid internal library overlap returns 400 and keeps prior config", func(t *testing.T) {
+		before := h.cfg.InternalLibrary
+		body := strings.NewReader(`{"internal_library":{"enabled":true,"path":"/photos"}}`)
+		r := httptest.NewRequest(http.MethodPost, "/api/settings", body)
+		w := httptest.NewRecorder()
+
+		h.handlePostSettings(w, r)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status mismatch: got %d want %d", w.Code, http.StatusBadRequest)
+		}
+		if h.cfg.InternalLibrary != before {
+			t.Fatalf("internal library changed on invalid update: got %#v want %#v", h.cfg.InternalLibrary, before)
+		}
+	})
 }
 
 func TestFeatureGates_InternalLibraryAndRecognition(t *testing.T) {

@@ -58,31 +58,33 @@ func (h *Handlers) handlePostSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	newCfg := *h.cfg
+
 	if req.ScanPaths != nil {
-		h.cfg.LibraryPaths = *req.ScanPaths
+		newCfg.LibraryPaths = *req.ScanPaths
 	} else if req.LibraryPaths != nil {
-		h.cfg.LibraryPaths = *req.LibraryPaths
+		newCfg.LibraryPaths = *req.LibraryPaths
 	}
 	if req.CameraWhitelist != nil {
-		h.cfg.CameraWhitelist = *req.CameraWhitelist
+		newCfg.CameraWhitelist = *req.CameraWhitelist
 	}
 	if req.FilenameFilters != nil {
-		h.cfg.FilenameFilters = *req.FilenameFilters
+		newCfg.FilenameFilters = *req.FilenameFilters
 	}
 	if req.ScanWorkers != nil && *req.ScanWorkers > 0 {
-		h.cfg.ScanWorkers = *req.ScanWorkers
+		newCfg.ScanWorkers = *req.ScanWorkers
 	}
 	if req.EventGapDays != nil && *req.EventGapDays > 0 {
-		h.cfg.EventGapDays = *req.EventGapDays
+		newCfg.EventGapDays = *req.EventGapDays
 	}
 	if req.EventGeoKm != nil && *req.EventGeoKm > 0 {
-		h.cfg.EventGeoKm = *req.EventGeoKm
+		newCfg.EventGeoKm = *req.EventGeoKm
 	}
 	if req.SessionTTLHours != nil && *req.SessionTTLHours > 0 {
-		h.cfg.SessionTTLHours = *req.SessionTTLHours
+		newCfg.SessionTTLHours = *req.SessionTTLHours
 	}
 	if req.LogFile != nil {
-		h.cfg.LogFile = *req.LogFile
+		newCfg.LogFile = *req.LogFile
 	}
 	if req.LogLevel != nil {
 		// Validate log level against allowed values.
@@ -91,19 +93,19 @@ func (h *Handlers) handlePostSettings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid log_level: must be one of debug, info, warn, error")
 			return
 		}
-		h.cfg.LogLevel = *req.LogLevel
+		newCfg.LogLevel = *req.LogLevel
 	}
 	if req.InternalLibrary != nil {
-		h.cfg.InternalLibrary = *req.InternalLibrary
+		newCfg.InternalLibrary = *req.InternalLibrary
 	}
 	if req.Dropzone != nil {
-		h.cfg.Dropzone = *req.Dropzone
+		newCfg.Dropzone = *req.Dropzone
 	}
 	if req.FaceRecognition != nil {
-		h.cfg.FaceRecognition = *req.FaceRecognition
+		newCfg.FaceRecognition = *req.FaceRecognition
 	}
 	if req.AuthEnabled != nil {
-		h.cfg.Auth.Enabled = *req.AuthEnabled
+		newCfg.Auth.Enabled = *req.AuthEnabled
 	}
 	if req.NewPassword != nil && *req.NewPassword != "" {
 		hash, err := auth.HashPassword(*req.NewPassword)
@@ -111,13 +113,19 @@ func (h *Handlers) handlePostSettings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "password hashing failed")
 			return
 		}
-		h.cfg.Auth.PasswordHash = hash
+		newCfg.Auth.PasswordHash = hash
 	}
 
-	if err := config.Save(h.cfgPath, h.cfg); err != nil {
+	if err := config.Validate(&newCfg); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if err := config.Save(h.cfgPath, &newCfg); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save config")
 		return
 	}
+	*h.cfg = newCfg
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
