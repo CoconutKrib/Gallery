@@ -23,7 +23,7 @@ are present. No separate "AI build" is required.
 |---|---|---|---|
 | **A — Manual tagging** | `people` table, extended `faces`, full CRUD API, tagging UI on library photo detail, `/people` browse page | None — no extra libraries or models needed | ✅ **Complete** |
 | **B — Face detection** | Auto-populate `faces` rows with bounding boxes during scan; user confirms/removes and assigns people | `libonnxruntime.so` + SCRFD detection model | ✅ **Complete** |
-| **C — Face recognition** | Embedding extraction, identity clustering, suggestion pipeline, review UI | `libonnxruntime.so` + SCRFD detection model + ArcFace embedding model | Not started |
+| **C — Face recognition** | Embedding extraction, identity clustering, suggestion pipeline, review UI | `libonnxruntime.so` + SCRFD detection model + ArcFace embedding model | ✅ **Complete** |
 
 **Single binary:** there is only one build target — `go build ./...`. The
 `internal/recognition` package is always compiled in (it requires CGO, so a C

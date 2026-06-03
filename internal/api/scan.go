@@ -11,6 +11,7 @@ import (
 	"github.com/halleck/gallery/internal/cluster"
 	"github.com/halleck/gallery/internal/config"
 	"github.com/halleck/gallery/internal/db"
+	"github.com/halleck/gallery/internal/recognition"
 	"github.com/halleck/gallery/internal/scan"
 )
 
@@ -217,6 +218,7 @@ func (sm *ScanManager) runDropzoneScan() {
 		} else {
 			slog.Info("cluster: done")
 		}
+		runRecognitionPostScan(sm.database, sm.cfg)
 	}
 }
 
@@ -273,4 +275,77 @@ func (sm *ScanManager) runScans(paths []config.LibraryPath) {
 	} else {
 		slog.Info("cluster: done")
 	}
+
+	// Face recognition post-scan: suggest identities + cluster unidentified faces.
+	runRecognitionPostScan(sm.database, sm.cfg)
+}
+
+// runRecognitionPostScan runs the suggestion and clustering pipelines after a
+// scan completes, if the recognition runtime is available.
+// Step 1 — suggest: for unidentified faces, find the closest known person and
+// set person_id (unverified candidate).
+// Step 2 — cluster: group remaining unidentified faces by embedding similarity
+// and store the result in memory for the review UI.
+func runRecognitionPostScan(database *sql.DB, cfg *config.Config) {
+	if !recognition.IsAvailable() {
+		return
+	}
+
+	threshold := cfg.FaceRecognition.RecognitionThreshold
+	if threshold == 0 {
+		threshold = 0.35
+	}
+
+	// Step 1: suggestion pipeline.
+	verified, err := db.GetVerifiedFacesWithEmbeddings(database)
+	if err != nil {
+		slog.Error("recognition: loading verified faces", "err", err)
+	} else if len(verified) > 0 {
+		unid, err := db.GetUnidentifiedFacesWithEmbeddings(database)
+		if err != nil {
+			slog.Error("recognition: loading unidentified faces for suggest", "err", err)
+		} else if len(unid) > 0 {
+			verEmbs := facesToEmbeddings(verified)
+			unidEmbs := facesToEmbeddings(unid)
+			suggestions := recognition.Suggest(unidEmbs, verEmbs, threshold)
+			for _, s := range suggestions {
+				if err := db.SetFacePersonCandidate(database, s.FaceID, s.PersonID); err != nil {
+					slog.Warn("recognition: set person candidate", "face_id", s.FaceID, "err", err)
+				}
+			}
+			slog.Info("recognition: suggestions applied", "count", len(suggestions))
+		}
+	}
+
+	// Step 2: cluster remaining unidentified faces.
+	unid, err := db.GetUnidentifiedFacesWithEmbeddings(database)
+	if err != nil {
+		slog.Error("recognition: loading unidentified faces for cluster", "err", err)
+		return
+	}
+	minSamples := cfg.FaceRecognition.ClusterMinSamples
+	if minSamples < 2 {
+		minSamples = 2
+	}
+	embs := facesToEmbeddings(unid)
+	clusters := recognition.Cluster(embs, threshold, minSamples)
+	recognition.SetClusters(clusters)
+	slog.Info("recognition: clustering done", "unidentified", len(unid), "clusters", len(clusters))
+}
+
+// facesToEmbeddings converts db.Face slices into recognition.FaceEmbedding slices,
+// decoding the embedding bytes.
+func facesToEmbeddings(faces []*db.Face) []recognition.FaceEmbedding {
+	out := make([]recognition.FaceEmbedding, 0, len(faces))
+	for _, f := range faces {
+		if len(f.Embedding) == 0 {
+			continue
+		}
+		out = append(out, recognition.FaceEmbedding{
+			FaceID:    f.ID,
+			PersonID:  f.PersonID,
+			Embedding: recognition.BytesToEmbedding(f.Embedding),
+		})
+	}
+	return out
 }

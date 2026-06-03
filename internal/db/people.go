@@ -28,19 +28,20 @@ type PersonUpdate struct {
 
 // Face represents a row in the faces table.
 type Face struct {
-	ID         int64
-	PhotoID    int64
-	PersonID   *int64
-	PersonName *string // populated by join queries, not stored
-	BboxX      *float64
-	BboxY      *float64
-	BboxW      *float64
-	BboxH      *float64
-	Source     string   // 'manual' | 'auto'
-	Confidence *float64 // nil for manual tags
-	Embedding  []byte   // nil in Phase A
-	Verified   bool
-	CreatedAt  time.Time
+	ID          int64
+	PhotoID     int64
+	PersonID    *int64
+	PersonName  *string // populated by join queries, not stored
+	PhotoSHA256 string  // populated by join queries that include photos.sha256
+	BboxX       *float64
+	BboxY       *float64
+	BboxW       *float64
+	BboxH       *float64
+	Source      string   // 'manual' | 'auto'
+	Confidence  *float64 // nil for manual tags
+	Embedding   []byte   // nil in Phase A
+	Verified    bool
+	CreatedAt   time.Time
 }
 
 // FaceUpdate carries fields that PATCH /api/faces/{id} may change.
@@ -185,6 +186,32 @@ func DeletePerson(database *sql.DB, id int64) error {
 	return tx.Commit()
 }
 
+// MergePerson reassigns all faces from fromID to toID, then deletes fromID.
+// The from person's cover_face_id is cleared first to break the circular FK.
+func MergePerson(database *sql.DB, fromID, toID int64) error {
+	tx, err := database.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning tx: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.Exec(`UPDATE people SET cover_face_id = NULL WHERE id = ?`, fromID); err != nil {
+		return fmt.Errorf("clearing cover_face_id: %w", err)
+	}
+	if _, err = tx.Exec(`UPDATE faces SET person_id = ? WHERE person_id = ?`, toID, fromID); err != nil {
+		return fmt.Errorf("reassigning faces: %w", err)
+	}
+	if _, err = tx.Exec(`DELETE FROM people WHERE id = ?`, fromID); err != nil {
+		return fmt.Errorf("deleting source person: %w", err)
+	}
+
+	return tx.Commit()
+}
+
 // ---- Face CRUD ----
 
 // InsertFace inserts a new face row and returns the new ID.
@@ -211,7 +238,7 @@ func InsertFace(database *sql.DB, f Face) (int64, error) {
 // GetFaceByID returns a single face row or sql.ErrNoRows.
 func GetFaceByID(database *sql.DB, id int64) (*Face, error) {
 	row := database.QueryRow(`
-		SELECT f.id, f.photo_id, f.person_id, p.name,
+		SELECT f.id, f.photo_id, f.person_id, pe.name,
 		       f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h,
 		       f.source, f.confidence, f.embedding, f.verified, f.created_at
 		FROM faces f
@@ -411,6 +438,67 @@ func scanFace(row libraryCopyScanner) (*Face, error) {
 	return f, nil
 }
 
+// scanFaceWithSHA scans a Face row that includes photo.sha256 as the
+// 14th column (appended after the standard 13 columns).
+func scanFaceWithSHA(row libraryCopyScanner) (*Face, error) {
+	f := &Face{}
+	var personIDNull sql.NullInt64
+	var personNameNull sql.NullString
+	var bboxX, bboxY, bboxW, bboxH sql.NullFloat64
+	var confidence sql.NullFloat64
+	var verified int
+	var createdStr string
+	var sha256 sql.NullString
+
+	if err := row.Scan(
+		&f.ID, &f.PhotoID, &personIDNull, &personNameNull,
+		&bboxX, &bboxY, &bboxW, &bboxH,
+		&f.Source, &confidence, &f.Embedding, &verified, &createdStr,
+		&sha256,
+	); err != nil {
+		return nil, err
+	}
+	if personIDNull.Valid {
+		f.PersonID = &personIDNull.Int64
+	}
+	if personNameNull.Valid {
+		f.PersonName = &personNameNull.String
+	}
+	if bboxX.Valid {
+		f.BboxX = &bboxX.Float64
+	}
+	if bboxY.Valid {
+		f.BboxY = &bboxY.Float64
+	}
+	if bboxW.Valid {
+		f.BboxW = &bboxW.Float64
+	}
+	if bboxH.Valid {
+		f.BboxH = &bboxH.Float64
+	}
+	if confidence.Valid {
+		f.Confidence = &confidence.Float64
+	}
+	f.Verified = verified != 0
+	f.CreatedAt, _ = time.Parse(time.RFC3339, createdStr)
+	if sha256.Valid {
+		f.PhotoSHA256 = sha256.String
+	}
+	return f, nil
+}
+
+func scanFacesWithSHA(rows *sql.Rows) ([]*Face, error) {
+	var out []*Face
+	for rows.Next() {
+		f, err := scanFaceWithSHA(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning face with sha: %w", err)
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
 func scanFaces(rows *sql.Rows) ([]*Face, error) {
 	var out []*Face
 	for rows.Next() {
@@ -434,6 +522,44 @@ func HasAutoFacesForPhoto(database *sql.DB, photoID int64) (bool, error) {
 		photoID,
 	).Scan(&count)
 	return count > 0, err
+}
+
+// ListFacesByPerson returns all faces assigned to a given person (verified or unverified).
+// Returns faces joined with photo sha256 so callers can display face crops.
+func ListFacesByPerson(database *sql.DB, personID int64, page, perPage int) ([]*Face, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if perPage < 1 {
+		perPage = 50
+	}
+	if perPage > 500 {
+		perPage = 500
+	}
+	var total int
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM faces WHERE person_id = ?`, personID,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("counting faces for person: %w", err)
+	}
+	offset := (page - 1) * perPage
+	rows, err := database.Query(`
+		SELECT f.id, f.photo_id, f.person_id, pe.name,
+		       f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h,
+		       f.source, f.confidence, f.embedding, f.verified, f.created_at,
+		       ph.sha256
+		FROM   faces f
+		JOIN   photos ph ON ph.id = f.photo_id
+		LEFT   JOIN people pe ON pe.id = f.person_id
+		WHERE  f.person_id = ?
+		ORDER  BY f.id DESC
+		LIMIT  ? OFFSET ?`, personID, perPage, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("querying faces by person: %w", err)
+	}
+	defer rows.Close()
+	faces, err := scanFacesWithSHA(rows)
+	return faces, total, err
 }
 
 // ListUnidentifiedFaces returns a page of auto-detected faces with no person assigned.
@@ -491,4 +617,53 @@ func ListUnverifiedSuggestions(database *sql.DB) ([]*Face, error) {
 	}
 	defer rows.Close()
 	return scanFaces(rows)
+}
+
+// GetVerifiedFacesWithEmbeddings returns all verified faces that have an
+// embedding and a person_id — used by the suggestion pipeline.
+func GetVerifiedFacesWithEmbeddings(database *sql.DB) ([]*Face, error) {
+	rows, err := database.Query(`
+			SELECT f.id, f.photo_id, f.person_id, NULL,
+			       f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h,
+			       f.source, f.confidence, f.embedding, f.verified, f.created_at
+			FROM faces f
+			WHERE f.verified = 1
+			  AND f.person_id IS NOT NULL
+			  AND f.embedding IS NOT NULL
+			ORDER BY f.id`)
+	if err != nil {
+		return nil, fmt.Errorf("getting verified faces: %w", err)
+	}
+	defer rows.Close()
+	return scanFaces(rows)
+}
+
+// GetUnidentifiedFacesWithEmbeddings returns all unidentified auto-detected
+// faces that have an embedding — used by the clustering pipeline.
+func GetUnidentifiedFacesWithEmbeddings(database *sql.DB) ([]*Face, error) {
+	rows, err := database.Query(`
+			SELECT f.id, f.photo_id, f.person_id, NULL,
+			       f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h,
+			       f.source, f.confidence, f.embedding, f.verified, f.created_at
+			FROM faces f
+			WHERE f.source = 'auto'
+			  AND f.person_id IS NULL
+			  AND f.embedding IS NOT NULL
+			ORDER BY f.id`)
+	if err != nil {
+		return nil, fmt.Errorf("getting unidentified faces: %w", err)
+	}
+	defer rows.Close()
+	return scanFaces(rows)
+}
+
+// SetFacePersonCandidate assigns a candidate person_id to an auto-detected face,
+// leaving verified=0. Only updates faces that still have person_id IS NULL
+// (prevents overwriting user decisions made after the scan started).
+func SetFacePersonCandidate(database *sql.DB, faceID, personID int64) error {
+	_, err := database.Exec(
+		`UPDATE faces SET person_id = ? WHERE id = ? AND person_id IS NULL`,
+		personID, faceID,
+	)
+	return err
 }

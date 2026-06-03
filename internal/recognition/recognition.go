@@ -31,6 +31,11 @@ var (
 	det          *Detector
 	emb          *Embedder
 	initialised  bool
+
+	// clusterMu guards the in-memory cluster state (recomputed after each scan).
+	clusterMu    sync.RWMutex
+	clusterStore []FaceCluster
+	faceCluster  map[int64]int // faceID → clusterID
 )
 
 // Init loads the ONNX runtime and model files according to cfg.
@@ -179,6 +184,40 @@ func GetEmbedder() *Embedder {
 	mu.RLock()
 	defer mu.RUnlock()
 	return emb
+}
+
+// SetClusters stores the latest clustering result in memory.
+// Called by the post-scan hook and by POST /api/faces/cluster.
+func SetClusters(clusters []FaceCluster) {
+	lookup := make(map[int64]int, len(clusters)*8)
+	for _, c := range clusters {
+		for _, faceID := range c.FaceIDs {
+			lookup[faceID] = c.ClusterID
+		}
+	}
+	clusterMu.Lock()
+	clusterStore = clusters
+	faceCluster = lookup
+	clusterMu.Unlock()
+}
+
+// GetClusters returns a snapshot of the current cluster list.
+func GetClusters() []FaceCluster {
+	clusterMu.RLock()
+	defer clusterMu.RUnlock()
+	return clusterStore
+}
+
+// GetClusterIDForFace returns the cluster ID for a face, and ok=true if the
+// face belongs to any cluster. Returns -1, false when not clustered.
+func GetClusterIDForFace(faceID int64) (int, bool) {
+	clusterMu.RLock()
+	defer clusterMu.RUnlock()
+	if faceCluster == nil {
+		return -1, false
+	}
+	id, ok := faceCluster[faceID]
+	return id, ok
 }
 
 // Cleanup releases the ONNX runtime environment. Call on server shutdown.

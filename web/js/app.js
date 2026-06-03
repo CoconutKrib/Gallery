@@ -16,6 +16,7 @@ Gallery.router = (() => {
     { pattern: /^\/staging$/, page: 'staging' },
     { pattern: /^\/library$/, page: 'library' },
     { pattern: /^\/people(?:\/(\d+))?$/, page: 'people' },
+    { pattern: /^\/faces\/review$/, page: 'people', action: 'review' },
     { pattern: /^\/settings$/, page: 'settings' },
     { pattern: /^\/$/, page: 'home' },
   ];
@@ -27,7 +28,7 @@ Gallery.router = (() => {
       if (m) {
         const handler = Gallery.pages[route.page];
         if (handler) {
-          handler(...m.slice(1));
+          handler(...m.slice(1), { action: route.action || null });
           return;
         }
       }
@@ -65,6 +66,10 @@ Gallery.router = (() => {
     // Fetch recognition status (non-blocking; used by people.js and library.js).
     Gallery.utils.api('/api/recognition/status').then(status => {
       Gallery.recognitionStatus = status;
+      if (status && status.enabled && status.available) {
+        const link = document.getElementById('nav-faces-review');
+        if (link) link.style.display = '';
+      }
     }).catch(() => {
       Gallery.recognitionStatus = { enabled: false, available: false };
     });

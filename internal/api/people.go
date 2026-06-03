@@ -9,24 +9,31 @@ import (
 	"strconv"
 
 	"github.com/halleck/gallery/internal/db"
+	"github.com/halleck/gallery/internal/recognition"
 )
 
 // ---- helpers ----
 
 func faceToJSON(f *db.Face) map[string]any {
+	var clusterID any = nil
+	if id, ok := recognition.GetClusterIDForFace(f.ID); ok {
+		clusterID = id
+	}
 	return map[string]any{
-		"id":          f.ID,
-		"photo_id":    f.PhotoID,
-		"person_id":   f.PersonID,
-		"person_name": f.PersonName,
-		"bbox_x":      f.BboxX,
-		"bbox_y":      f.BboxY,
-		"bbox_w":      f.BboxW,
-		"bbox_h":      f.BboxH,
-		"source":      f.Source,
-		"confidence":  f.Confidence,
-		"verified":    f.Verified,
-		"created_at":  f.CreatedAt,
+		"id":           f.ID,
+		"photo_id":     f.PhotoID,
+		"photo_sha256": f.PhotoSHA256,
+		"person_id":    f.PersonID,
+		"person_name":  f.PersonName,
+		"bbox_x":       f.BboxX,
+		"bbox_y":       f.BboxY,
+		"bbox_w":       f.BboxW,
+		"bbox_h":       f.BboxH,
+		"source":       f.Source,
+		"confidence":   f.Confidence,
+		"verified":     f.Verified,
+		"cluster_id":   clusterID,
+		"created_at":   f.CreatedAt,
 	}
 }
 
@@ -200,6 +207,51 @@ func (h *Handlers) handleDeletePerson(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// POST /api/people/{id}/merge
+// Body: {"into": <person_id>}
+// Reassigns all faces from {id} to {into}, then deletes {id}.
+func (h *Handlers) handleMergePerson(w http.ResponseWriter, r *http.Request) {
+	if !h.stagingEnabled(w) {
+		return
+	}
+	fromID, err := parseID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	var body struct {
+		Into int64 `json:"into"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Into == 0 {
+		writeError(w, http.StatusBadRequest, "body must have 'into' person id")
+		return
+	}
+	if fromID == body.Into {
+		writeError(w, http.StatusBadRequest, "cannot merge a person into themselves")
+		return
+	}
+	if _, err := db.GetPersonByID(h.db, fromID); errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "source person not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	if _, err := db.GetPersonByID(h.db, body.Into); errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "target person not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	if err := db.MergePerson(h.db, fromID, body.Into); err != nil {
+		slog.Error("merge person", "from", fromID, "into", body.Into, "err", err)
+		writeError(w, http.StatusInternalServerError, "merge failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "merged_into": body.Into})
 }
 
 // GET /api/people/{id}/photos
@@ -569,7 +621,7 @@ func (h *Handlers) handleRejectFace(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/faces/cluster
-// Triggers a manual re-cluster of unidentified face embeddings (Phase C stub).
+// Triggers a manual re-cluster of unidentified face embeddings.
 func (h *Handlers) handleTriggerCluster(w http.ResponseWriter, r *http.Request) {
 	if !h.stagingEnabled(w) {
 		return
@@ -577,6 +629,7 @@ func (h *Handlers) handleTriggerCluster(w http.ResponseWriter, r *http.Request) 
 	if !h.recognitionCheck(w) {
 		return
 	}
-	// Phase C: full clustering will be implemented here.
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "clusters": 0})
+	runRecognitionPostScan(h.db, h.cfg)
+	clusters := recognition.GetClusters()
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "clusters": len(clusters)})
 }

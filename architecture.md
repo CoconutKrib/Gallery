@@ -70,6 +70,14 @@ gallery/
 │   ├── cluster/
 │   │   └── cluster.go       # Rule-based event clustering (gap days + geo distance); called after every scan
 │   │
+│   ├── recognition/
+│   │   ├── recognition.go   # Status struct; Init(cfg); IsAvailable(); cluster state (SetClusters/GetClusters/GetClusterIDForFace)
+│   │   ├── detect.go        # SCRFD-10G ONNX session; Detect(img) []Detection; anchor decoding + NMS
+│   │   ├── embed.go         # ArcFace/R50 ONNX session; Embed(img, det) []float32; L2-normalises output
+│   │   ├── preprocess.go    # preprocessBGRFloat32, cropImage, l2NormalizeInPlace, EmbeddingToBytes, BytesToEmbedding
+│   │   ├── cluster.go       # Union-find clustering; Cluster(faces, threshold, minSamples) []FaceCluster
+│   │   └── suggest.go       # Nearest-neighbour suggestion; Suggest(unidentified, verified, threshold) []Suggestion
+│   │
 │   ├── library/
 │   │   └── copy.go          # CopyToLibrary: path construction, collision resolution, os.Copy, DB insert; bulk copy triggers cluster.Run
 │   │
@@ -77,14 +85,15 @@ gallery/
 │   │   ├── router.go        # Route registration, Handlers struct, authMiddleware
 │   │   ├── photos.go        # /api/photos list + detail (includes event_id, duplicates) + image/thumbnail serve
 │   │   ├── browse.go        # /api/browse and /api/libraries handlers
-│   │   ├── scan.go          # /api/scan trigger + status, ScanManager (triggers cluster.Run on completion)
+│   │   ├── scan.go          # /api/scan trigger + status, ScanManager (triggers cluster.Run then runRecognitionPostScan after each scan)
 │   │   ├── map.go           # /api/map (all pins), /api/map/nearby?lat&lon&radius_km
 │   │   ├── timeline.go      # /api/timeline — bucket counts by zoom level (decade/year/month/week/day)
 │   │   ├── events.go        # /api/events list, /api/events/{id} detail + photos
 │   │   ├── dedup.go         # /api/dedup/report (library summaries + cross-path overlap), /api/dedup/subtree
-│   │   ├── settings.go      # /api/settings get/post, login/logout, issues
+│   │   ├── settings.go      # /api/settings get/post, login/logout, issues, /api/recognition/status
 │   │   ├── staging.go       # /api/staging CRUD + approve/reject state transitions
-│   │   └── library.go       # /api/library/copy, /api/library/status, /api/library/photos, /api/library/tree
+│   │   ├── library.go       # /api/library/copy, /api/library/status, /api/library/photos, /api/library/tree
+│   │   └── people.go        # /api/people CRUD + /api/people/{id}/merge; /api/library/copies/{id}/faces; /api/faces/* (CRUD, confirm, reject, cluster)
 │   │
 │   └── auth/
 │       └── auth.go          # In-memory session store, bcrypt login, middleware helper
@@ -103,9 +112,10 @@ gallery/
     │   ├── map.js           # Geo map view (Leaflet, radius search, circle overlay)
     │   ├── events.js        # Event list + event detail photo grid
     │   ├── dedup.js         # Dedup report (per-library summary, cross-path overlap, subtree analyser)
-│   │   ├── settings.js      # Settings / scan management view
-│   │   ├── staging.js       # Staging queue: photo grid + annotation form + approve/reject actions
-│   │   └── library.js       # Internal library browse: folder tree + photo grid
+    │   ├── settings.js      # Settings / scan management; recognition status section
+    │   ├── staging.js       # Staging queue: photo grid + annotation form + approve/reject actions
+    │   ├── library.js       # Internal library browse: folder tree + photo grid; edit panel with people/face-tagging
+    │   └── people.js        # /people list, /people/{id} detail (edit + merge), /faces/review (cluster + suggestion UI)
     └── vendor/
         ├── plotly.min.js    # Plotly basic bundle (vendored, ~1MB)
         └── leaflet/         # Leaflet 1.9.4 (JS, CSS, marker images)
@@ -134,6 +144,7 @@ type Config struct {
     FilenameFilters FilenameFilters        `json:"filename_filters"`
     InternalLibrary InternalLibraryConfig  `json:"internal_library"`
     Dropzone        DropzoneConfig         `json:"dropzone"`
+    FaceRecognition FaceRecognitionConfig  `json:"face_recognition"`
     Auth            AuthConfig             `json:"auth"`
     DBPath          string                 `json:"db_path"`
     CacheDir        string                 `json:"cache_dir"`
@@ -249,6 +260,8 @@ URL patterns match the slugs defined in requirements:
 - `/settings` → `settings.js`
 - `/staging` → `staging.js` (hidden when `internal_library.enabled = false`)
 - `/library` → `library.js` (hidden when `internal_library.enabled = false`)
+- `/people`, `/people/:id` → `people.js` (hidden when `internal_library.enabled = false`)
+- `/faces/review` → `people.js` with `action: 'review'` (hidden unless recognition `enabled && available`)
 
 ### 4.2 Page modules
 
@@ -347,6 +360,7 @@ CMD ["./gallery", "--config", "/data/config.json"]
 | `github.com/rwcarlsen/goexif/exif` | EXIF extraction from JPEG |
 | `golang.org/x/image` | Image decoding/resizing for thumbnails |
 | `golang.org/x/crypto/bcrypt` | Password hashing |
+| `github.com/yalue/onnxruntime_go` | CGO bindings for ONNX Runtime; loads `libonnxruntime` dynamically at runtime |
 | Plotly.js (vendored, basic bundle) | Timeline bar chart |
 | Leaflet 1.9.4 (vendored) | Interactive geo map |
 
@@ -402,3 +416,18 @@ HEIC support is deferred. There is no npm build step.
 
 ### Phase 7 — Dropzone
 - Lenient scanner mode (`strict` vs `lenient`), `source = 'dropzone'` tagging on ingested photos, auto-staging on ingest, `/api/scan` dropzone trigger.
+
+### Phase 8 — Library copy editing & re-organisation ✅
+- Migration `003_library_copy_metadata.sql`: `title`, `description`, `override_date`, `event_id` on `library_copies`.
+- `PATCH /api/library/copies/{id}` with re-org trigger (`MovePhoto`, `pruneEmptyDirs`).
+- Extended `GET /api/library/photos` filters: `source`, `has_date_override`, `true_date_unknown`, `tag`, `event_id`, `q`.
+- Edit panel in `library.js`.
+
+### Phase 9 — Library photo removal ✅
+- `DELETE /api/library/copies/{id}` with full cascade: `photo_events → staging_queue → duplicate_paths → library_copies → photos` + physical file delete.
+- Confirmation UI in `library.js`.
+
+### Phase 10 — People tagging + face recognition ✅
+- **Phase A (manual tagging)**: migration `004_people.sql` (`people` table + extended `faces`); full CRUD API for people and face tags; tagging panel in `library.js` edit panel; `/people` browse + `/people/{id}` detail with edit, delete, and merge actions.
+- **Phase B (auto face detection)**: `internal/recognition` package (SCRFD-10G + ArcFace/R50 via `onnxruntime_go`); scanner auto-detects faces and stores bbox + 512-dim embeddings; `GET /api/recognition/status`; recognition-gated 501/503 on recognition endpoints.
+- **Phase C (identity clustering + review UI)**: post-scan suggestion pipeline (per-person mean embedding nearest-neighbour); union-find clustering of unidentified faces; in-memory cluster store; `/api/faces/unidentified`, `/api/faces/suggestions`, `/api/faces/cluster`; `/faces/review` two-panel UI; recognition status section in Settings.

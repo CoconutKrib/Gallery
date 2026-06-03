@@ -6,6 +6,4 @@ TODO
 
 * Export of data/metadata?
 
-* Update spec to always use  RFC3339 representations when interacting with the sqlite database, as this is the format that sqlite's strftime understands natively.
-
 * filename filter - include then exclude (e.g exclude beats include), and check for case insensitivity (jpg, JPG etc, DSCN dscn...)

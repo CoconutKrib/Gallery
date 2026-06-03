@@ -141,6 +141,11 @@ Gallery.pages.settings = async function () {
       <div class="settings-row"><span class="label">Event geo (km)</span><span class="value">${settings.event_geo_km}</span></div>
     </div>
 
+    <div class="settings-section" id="section-recognition">
+      <h2>Face Recognition</h2>
+      <div id="recognition-status-panel"><span style="color:var(--muted)">Loading…</span></div>
+    </div>
+
     <div class="settings-section" id="section-issues">
       <h2>Ingest Issues
         <button class="settings-toggle-btn" id="issues-toggle"
@@ -152,6 +157,7 @@ Gallery.pages.settings = async function () {
 
   Gallery.settings.renderWhitelist();
   Gallery.settings.renderFilters();
+  Gallery.settings.loadRecognitionStatus();
 };
 
 // ── Settings module ───────────────────────────────────────────────────────────
@@ -160,6 +166,39 @@ Gallery.settings = {
   _whitelist: [],
   _filters: { include: [], exclude: [] },
   _issuesLoaded: false,
+
+  // ── Face Recognition Status ────────────────────────────────────────────────
+  async loadRecognitionStatus() {
+    const panel = document.getElementById('recognition-status-panel');
+    if (!panel) return;
+    try {
+      const s = await Gallery.utils.api('/api/recognition/status');
+      const esc = Gallery.utils.esc;
+      let statusBadge, details = '';
+      if (!s.enabled) {
+        statusBadge = `<span class="pill pill-warn">disabled</span>`;
+        details = `<div class="settings-row"><span class="label">Config</span>
+          <span class="value" style="color:var(--muted)">Set <code>face_recognition.enabled = true</code> to activate</span></div>`;
+      } else if (!s.available) {
+        statusBadge = `<span class="pill pill-warn">unavailable</span>`;
+        details = `<div class="settings-row"><span class="label">Reason</span>
+          <span class="value" style="color:var(--danger)">${esc(s.reason || 'unknown')}</span></div>`;
+      } else {
+        const epColor = s.execution_provider === 'CPU' ? 'var(--warning, #f90)' : 'var(--ok, #4c4)';
+        statusBadge = `<span class="pill pill-ok">active</span>`;
+        details = `<div class="settings-row"><span class="label">Execution provider</span>
+          <span class="value" style="color:${epColor}">${esc(s.execution_provider)}</span></div>`;
+        if (s.execution_provider === 'CPU') {
+          details += `<div class="settings-row"><span style="color:var(--warning,#f90);font-size:12px">
+            ⚠ Running on CPU — face recognition will be slow for large libraries. Consider installing CUDA for GPU acceleration.</span></div>`;
+        }
+      }
+      panel.innerHTML = `<div class="settings-row"><span class="label">Status</span>
+        <span class="value">${statusBadge}</span></div>${details}`;
+    } catch (e) {
+      if (panel) panel.innerHTML = `<span style="color:var(--muted)">Unavailable: ${Gallery.utils.esc(e.message)}</span>`;
+    }
+  },
 
   // ── Whitelist ──────────────────────────────────────────────────────────────
   renderWhitelist() {

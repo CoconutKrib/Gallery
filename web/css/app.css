@@ -903,6 +903,8 @@ a:hover { color: var(--accent-h); }
 
 /* ── Stage button on photo cards ── */
 /* Hidden by default; .library-enabled on <body> reveals them on hover. */
+.nav-library-only { display: none; }
+.library-enabled .nav-library-only { display: inline; }
 .stage-btn {
   display: none;
   position: absolute;
