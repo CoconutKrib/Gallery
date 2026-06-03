@@ -11,25 +11,28 @@ import (
 
 	"github.com/halleck/gallery/internal/auth"
 	"github.com/halleck/gallery/internal/config"
+	"github.com/halleck/gallery/internal/recognition"
 )
 
 // Handlers holds shared dependencies for all API handlers.
 type Handlers struct {
-	db       *sql.DB
-	cfg      *config.Config
-	cfgPath  string
-	scanner  *ScanManager
-	sessions *auth.Store
+	db          *sql.DB
+	cfg         *config.Config
+	cfgPath     string
+	scanner     *ScanManager
+	sessions    *auth.Store
+	recognition recognition.Status
 }
 
 // NewHandlers creates a Handlers with all dependencies wired up.
-func NewHandlers(db *sql.DB, cfg *config.Config, cfgPath string) *Handlers {
+func NewHandlers(db *sql.DB, cfg *config.Config, cfgPath string, recogStatus recognition.Status) *Handlers {
 	return &Handlers{
-		db:       db,
-		cfg:      cfg,
-		cfgPath:  cfgPath,
-		scanner:  newScanManager(db, cfg),
-		sessions: auth.NewStore(cfg.SessionTTLHours),
+		db:          db,
+		cfg:         cfg,
+		cfgPath:     cfgPath,
+		scanner:     newScanManager(db, cfg),
+		sessions:    auth.NewStore(cfg.SessionTTLHours),
+		recognition: recogStatus,
 	}
 }
 
@@ -95,8 +98,15 @@ func (h *Handlers) RegisterRoutes(mux *http.ServeMux, staticFS http.FileSystem) 
 	api("PATCH", "/api/faces/{id}", h.handlePatchFace)
 	api("DELETE", "/api/faces/{id}", h.handleDeleteFace)
 
-	// Recognition status (always available; returns available=false until Phase B/C).
+	// Recognition status (always available).
 	api("GET", "/api/recognition/status", h.handleRecognitionStatus)
+
+	// Recognition pipeline — Phase B/C (gated on recognition available).
+	api("GET", "/api/faces/unidentified", h.handleUnidentifiedFaces)
+	api("GET", "/api/faces/suggestions", h.handleSuggestions)
+	api("POST", "/api/faces/{id}/confirm", h.handleConfirmFace)
+	api("POST", "/api/faces/{id}/reject", h.handleRejectFace)
+	api("POST", "/api/faces/cluster", h.handleTriggerCluster)
 
 	// Static assets.
 	static := http.FileServer(staticFS)

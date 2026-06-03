@@ -6,6 +6,18 @@ This module is **intentionally kept out of the main Gallery module** (underscore
 
 ---
 
+## Quickstart - for our given setup:
+
+```
+cd /home/halleck/gallery/_exploration/onnxruntime_spike 
+
+export ONNXRUNTIME_LIB=/home/halleck/gallery/onnx/onnxruntime-linux-x64-gpu-1.26.0/lib/libonnxruntime.so.1.26.0
+export BUFFALO_L_DIR=/home/halleck/gallery/insightface/buffalo_l
+
+
+./gallery-onnx-spike     -lib    "$ONNXRUNTIME_LIB"     -models "$BUFFALO_L_DIR"     -img    "/home/halleck/gallery/samples/IMG_0361.JPG"
+```
+
 ## Prerequisites
 
 ### 1 — ONNX Runtime shared library

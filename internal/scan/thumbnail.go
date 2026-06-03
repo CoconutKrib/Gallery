@@ -18,6 +18,7 @@ type ThumbJob struct {
 	SourcePath string
 	SHA256     string
 	CacheDir   string
+	PhotoID    int64 // set on new ingests; used for face detection (Phase B)
 	// Result is written back here by the worker.
 	ResultPath string
 	Err        error

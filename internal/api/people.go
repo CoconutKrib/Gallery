@@ -422,3 +422,161 @@ func toDoublePtrFloat(p *float64) **float64 {
 	}
 	return &p
 }
+
+// ---- Recognition pipeline (Phase B/C) ----
+
+// recognitionCheck writes the appropriate error response when the recognition
+// pipeline is not available, and returns false to signal the handler should stop.
+func (h *Handlers) recognitionCheck(w http.ResponseWriter) bool {
+	if !h.recognition.Enabled {
+		writeError(w, http.StatusNotImplemented, "face recognition not enabled in config")
+		return false
+	}
+	if !h.recognition.Available {
+		writeError(w, http.StatusServiceUnavailable, h.recognition.Reason)
+		return false
+	}
+	return true
+}
+
+// GET /api/faces/unidentified
+func (h *Handlers) handleUnidentifiedFaces(w http.ResponseWriter, r *http.Request) {
+	if !h.stagingEnabled(w) {
+		return
+	}
+	if !h.recognitionCheck(w) {
+		return
+	}
+	page := 1
+	perPage := 50
+	if v := r.URL.Query().Get("page"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			page = n
+		}
+	}
+	if v := r.URL.Query().Get("per_page"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			perPage = n
+		}
+	}
+
+	faces, total, err := db.ListUnidentifiedFaces(h.db, page, perPage)
+	if err != nil {
+		slog.Error("list unidentified faces", "err", err)
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	out := make([]map[string]any, 0, len(faces))
+	for _, f := range faces {
+		out = append(out, faceToJSON(f))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"faces": out,
+		"total": total,
+		"page":  page,
+	})
+}
+
+// GET /api/faces/suggestions
+func (h *Handlers) handleSuggestions(w http.ResponseWriter, r *http.Request) {
+	if !h.stagingEnabled(w) {
+		return
+	}
+	if !h.recognitionCheck(w) {
+		return
+	}
+	faces, err := db.ListUnverifiedSuggestions(h.db)
+	if err != nil {
+		slog.Error("list suggestions", "err", err)
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	out := make([]map[string]any, 0, len(faces))
+	for _, f := range faces {
+		out = append(out, faceToJSON(f))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// POST /api/faces/{id}/confirm
+// Sets verified=1 on the current person_id assignment.
+func (h *Handlers) handleConfirmFace(w http.ResponseWriter, r *http.Request) {
+	if !h.stagingEnabled(w) {
+		return
+	}
+	if !h.recognitionCheck(w) {
+		return
+	}
+	id, err := parseID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	face, err := db.GetFaceByID(h.db, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		slog.Error("get face for confirm", "id", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	if face.PersonID == nil {
+		writeError(w, http.StatusConflict, "face has no person assigned; assign a person before confirming")
+		return
+	}
+	verified := true
+	if err := db.UpdateFace(h.db, id, db.FaceUpdate{Verified: &verified}); err != nil {
+		slog.Error("confirm face", "id", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	face, _ = db.GetFaceByID(h.db, id)
+	writeJSON(w, http.StatusOK, faceToJSON(face))
+}
+
+// POST /api/faces/{id}/reject
+// Clears person_id and resets verified=0, returning the face to the unidentified pool.
+func (h *Handlers) handleRejectFace(w http.ResponseWriter, r *http.Request) {
+	if !h.stagingEnabled(w) {
+		return
+	}
+	if !h.recognitionCheck(w) {
+		return
+	}
+	id, err := parseID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if _, err := db.GetFaceByID(h.db, id); errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	} else if err != nil {
+		slog.Error("get face for reject", "id", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	var nilPersonID *int64
+	verified := false
+	if err := db.UpdateFace(h.db, id, db.FaceUpdate{PersonID: &nilPersonID, Verified: &verified}); err != nil {
+		slog.Error("reject face", "id", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// POST /api/faces/cluster
+// Triggers a manual re-cluster of unidentified face embeddings (Phase C stub).
+func (h *Handlers) handleTriggerCluster(w http.ResponseWriter, r *http.Request) {
+	if !h.stagingEnabled(w) {
+		return
+	}
+	if !h.recognitionCheck(w) {
+		return
+	}
+	// Phase C: full clustering will be implemented here.
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "clusters": 0})
+}

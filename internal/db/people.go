@@ -422,3 +422,73 @@ func scanFaces(rows *sql.Rows) ([]*Face, error) {
 	}
 	return out, rows.Err()
 }
+
+// ---- Recognition helpers ----
+
+// HasAutoFacesForPhoto returns true if any source='auto' faces already exist
+// for the given photo_id. Used for scan idempotency.
+func HasAutoFacesForPhoto(database *sql.DB, photoID int64) (bool, error) {
+	var count int
+	err := database.QueryRow(
+		`SELECT COUNT(*) FROM faces WHERE photo_id = ? AND source = 'auto'`,
+		photoID,
+	).Scan(&count)
+	return count > 0, err
+}
+
+// ListUnidentifiedFaces returns a page of auto-detected faces with no person assigned.
+func ListUnidentifiedFaces(database *sql.DB, page, perPage int) ([]*Face, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if perPage < 1 {
+		perPage = 50
+	}
+	if perPage > 500 {
+		perPage = 500
+	}
+
+	var total int
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM faces WHERE source = 'auto' AND person_id IS NULL`,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("counting unidentified faces: %w", err)
+	}
+
+	rows, err := database.Query(`
+		SELECT f.id, f.photo_id, f.person_id, NULL,
+		       f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h,
+		       f.source, f.confidence, f.embedding, f.verified, f.created_at
+		FROM faces f
+		WHERE f.source = 'auto' AND f.person_id IS NULL
+		ORDER BY f.created_at DESC
+		LIMIT ? OFFSET ?`,
+		perPage, (page-1)*perPage,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("listing unidentified faces: %w", err)
+	}
+	defer rows.Close()
+
+	faces, err := scanFaces(rows)
+	return faces, total, err
+}
+
+// ListUnverifiedSuggestions returns auto-detected faces that have a candidate
+// person assigned but have not yet been confirmed by the user (verified=0).
+func ListUnverifiedSuggestions(database *sql.DB) ([]*Face, error) {
+	rows, err := database.Query(`
+		SELECT f.id, f.photo_id, f.person_id, p.name,
+		       f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h,
+		       f.source, f.confidence, f.embedding, f.verified, f.created_at
+		FROM faces f
+		LEFT JOIN people p ON p.id = f.person_id
+		WHERE f.source = 'auto' AND f.person_id IS NOT NULL AND f.verified = 0
+		ORDER BY f.created_at DESC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing unverified suggestions: %w", err)
+	}
+	defer rows.Close()
+	return scanFaces(rows)
+}

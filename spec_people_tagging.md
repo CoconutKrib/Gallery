@@ -22,7 +22,7 @@ are present. No separate "AI build" is required.
 | Phase | What ships | Runtime requirement | Status |
 |---|---|---|---|
 | **A — Manual tagging** | `people` table, extended `faces`, full CRUD API, tagging UI on library photo detail, `/people` browse page | None — no extra libraries or models needed | ✅ **Complete** |
-| **B — Face detection** | Auto-populate `faces` rows with bounding boxes during scan; user confirms/removes and assigns people | `libonnxruntime.so` + SCRFD detection model | Not started |
+| **B — Face detection** | Auto-populate `faces` rows with bounding boxes during scan; user confirms/removes and assigns people | `libonnxruntime.so` + SCRFD detection model | ✅ **Complete** |
 | **C — Face recognition** | Embedding extraction, identity clustering, suggestion pipeline, review UI | `libonnxruntime.so` + SCRFD detection model + ArcFace embedding model | Not started |
 
 **Single binary:** there is only one build target — `go build ./...`. The
@@ -173,8 +173,8 @@ recognition runtime is deferred to `recognition.Init()` at startup (so the serve
 can still start even if the library is absent). The only hard check at validate
 time is that `recognition_threshold` is in 0.0–1.0 when `enabled = true`.
 
-When `enabled = false` the entire `face_recognition` block is skipped; `Init()`
-is never called and no CGO is invoked at startup.
+When `enabled = false`, `Init()` returns immediately with a disabled `Status`
+without invoking any CGO (no `SetSharedLibraryPath`, no `InitializeEnvironment`).
 
 ---
 
@@ -235,7 +235,7 @@ described in the Frontend section below.
 
 All endpoints below return:
 - `501 Not Implemented` when `enabled = false` (user has not turned it on)
-- `503 Service Unavailable` with `{"reason": "..."}` when `enabled = true` but `available = false` (library/models missing)
+- `503 Service Unavailable` with `{"error": "..."}` when `enabled = true` but `available = false` (library/models missing)
 
 | Method | Path | Description |
 |---|---|---|
@@ -303,8 +303,9 @@ Exported functions:
 - `GetFaceByID(db, id int64) (*Face, error)`
 - `DeleteFace(db, id int64) error`
 - `UpdateFace(db, id int64, u FaceUpdate) error`
-- `ListUnidentifiedFaces(db, page, perPage int) ([]Face, error)`
-- `ListUnverifiedSuggestions(db) ([]Face, error)`
+- `HasAutoFacesForPhoto(db, photoID int64) (bool, error)` — idempotency check used by scanner
+- `ListUnidentifiedFaces(db, page, perPage int) ([]*Face, int, error)` — returns (faces, total, error)
+- `ListUnverifiedSuggestions(db) ([]*Face, error)`
 - `ListFacesByPerson(db, personID int64, page, perPage int) ([]Face, error)`
 
 ### `internal/recognition/` (new)
@@ -317,8 +318,9 @@ a C compiler (standard on Linux/macOS), not the onnxruntime library itself.
 | File | Purpose |
 |---|---|
 | `recognition.go` | `Status` struct; `Init(cfg) Status`; `IsAvailable() bool`; package-level singleton |
-| `detect.go` | SCRFD session; `Detect(img image.Image, threshold float32) ([]Detection, error)` — returns pixel-space boxes + 5 keypoints |
-| `embed.go` | ArcFace session; `Embed(img image.Image, det Detection) ([]float32, error)` — returns L2-normalised 512-dim vector |
+| `detect.go` | SCRFD session; `Detect(img image.Image) ([]Detection, error)` — threshold baked into `Detector` at construction via `newDetector(path, threshold, opts)` |
+| `embed.go` | ArcFace session; `Embed(img image.Image, det Detection, origW, origH int) ([]float32, error)` — `origW`/`origH` are the source image dimensions used to scale 640-space coordinates back |
+| `preprocess.go` | Shared helpers: `preprocessBGRFloat32`, `cropImage`, `l2NormalizeInPlace`, `EmbeddingToBytes`, `BytesToEmbedding` |
 | `cluster.go` | Pure Go — cosine similarity matrix + agglomerative clustering; no CGO; `Cluster(faces []FaceEmbedding) []FaceCluster` |
 | `suggest.go` | Pure Go — `Suggest(unidentified, personMeans []FaceEmbedding, threshold float64) []Suggestion` |
 
@@ -334,6 +336,7 @@ type Detection struct {
 }
 
 type Status struct {
+    Enabled           bool   // mirrors cfg.FaceRecognition.Enabled
     Available         bool
     ExecutionProvider string  // "CUDA", "CPU", or ""
     Reason            string  // non-empty when Available == false

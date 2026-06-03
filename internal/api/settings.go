@@ -189,13 +189,21 @@ func (h *Handlers) handleIssues(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/recognition/status
-// Always returns 200. In Phase A (no recognition runtime compiled in) the
-// response always carries available=false.
+// Always returns 200. Returns the runtime status of the face recognition pipeline.
 func (h *Handlers) handleRecognitionStatus(w http.ResponseWriter, r *http.Request) {
+	s := h.recognition
+	var ep interface{} = nil
+	if s.ExecutionProvider != "" {
+		ep = s.ExecutionProvider
+	}
+	var reason interface{} = nil
+	if s.Reason != "" {
+		reason = s.Reason
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"enabled":            h.cfg.FaceRecognition.Enabled,
-		"available":          false,
-		"execution_provider": nil,
-		"reason":             "face recognition runtime not yet available",
+		"enabled":            s.Enabled,
+		"available":          s.Available,
+		"execution_provider": ep,
+		"reason":             reason,
 	})
 }

@@ -3,6 +3,8 @@ package scan
 import (
 	"database/sql"
 	"fmt"
+	"image"
+	_ "image/jpeg"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/halleck/gallery/internal/config"
 	gdb "github.com/halleck/gallery/internal/db"
+	"github.com/halleck/gallery/internal/recognition"
 )
 
 // Stats tracks counters for a single scan run.
@@ -127,6 +130,10 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 				if updateErr := gdb.UpdateThumbnailPath(s.db, job.SHA256, path); updateErr != nil {
 					slog.Warn("thumbnail db update error", "sha256", job.SHA256, "err", updateErr)
 				}
+				// Phase B: run face detection + embedding when available.
+				if recognition.IsAvailable() && job.PhotoID != 0 {
+					s.detectAndStoreFaces(job.SourcePath, job.PhotoID)
+				}
 			}
 		}()
 	}
@@ -231,7 +238,8 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 
 		// New photo — ingest.
 		photo := buildPhotoRecord(exifData, hash, path, d.Name(), s.libraryPathID, s.source)
-		if _, insertErr := gdb.InsertPhoto(s.db, photo); insertErr != nil {
+		photoID, insertErr := gdb.InsertPhoto(s.db, photo)
+		if insertErr != nil {
 			slog.Error("scan insert error", "path", path, "err", insertErr)
 			stats.Errors++
 			return nil
@@ -264,11 +272,12 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 
 		s.progress(stats)
 
-		// Queue thumbnail generation.
+		// Queue thumbnail generation (and face detection when available).
 		thumbJobs <- &ThumbJob{
 			SourcePath: path,
 			SHA256:     hash,
 			CacheDir:   s.cfg.CacheDir,
+			PhotoID:    photoID,
 		}
 
 		return nil
@@ -297,6 +306,88 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 func isSupportedExtension(name string) bool {
 	lower := strings.ToLower(name)
 	return strings.HasSuffix(lower, ".jpg") || strings.HasSuffix(lower, ".jpeg")
+}
+
+// detectAndStoreFaces runs SCRFD detection and ArcFace embedding on the image
+// at sourcePath, then persists the detected faces in the database.
+// It is called from thumbnail worker goroutines and is safe for concurrent use
+// because each call creates its own ONNX sessions.
+// Idempotent: if auto faces already exist for photoID, does nothing.
+func (s *Scanner) detectAndStoreFaces(sourcePath string, photoID int64) {
+	has, err := gdb.HasAutoFacesForPhoto(s.db, photoID)
+	if err != nil {
+		slog.Warn("face detect: db check failed", "photo_id", photoID, "err", err)
+		return
+	}
+	if has {
+		return
+	}
+
+	f, err := os.Open(sourcePath)
+	if err != nil {
+		slog.Warn("face detect: open image failed", "path", sourcePath, "err", err)
+		return
+	}
+	img, _, err := image.Decode(f)
+	f.Close()
+	if err != nil {
+		slog.Warn("face detect: decode image failed", "path", sourcePath, "err", err)
+		return
+	}
+
+	detector := recognition.GetDetector()
+	if detector == nil {
+		return
+	}
+
+	dets, err := detector.Detect(img)
+	if err != nil {
+		slog.Warn("face detect: detection failed", "path", sourcePath, "err", err)
+		return
+	}
+
+	if len(dets) == 0 {
+		slog.Debug("face detect: no faces found", "path", sourcePath)
+		return
+	}
+
+	slog.Info("face detect: found faces", "path", sourcePath, "count", len(dets))
+
+	origW := img.Bounds().Dx()
+	origH := img.Bounds().Dy()
+	embedder := recognition.GetEmbedder()
+
+	for _, det := range dets {
+		bboxX := float64(det.X1) / float64(recognition.DetInputW)
+		bboxY := float64(det.Y1) / float64(recognition.DetInputH)
+		bboxW := float64(det.X2-det.X1) / float64(recognition.DetInputW)
+		bboxH := float64(det.Y2-det.Y1) / float64(recognition.DetInputH)
+		conf := float64(det.Score)
+
+		face := gdb.Face{
+			PhotoID:    photoID,
+			BboxX:      &bboxX,
+			BboxY:      &bboxY,
+			BboxW:      &bboxW,
+			BboxH:      &bboxH,
+			Source:     "auto",
+			Confidence: &conf,
+			Verified:   false,
+		}
+
+		if embedder != nil {
+			emb, embErr := embedder.Embed(img, det, origW, origH)
+			if embErr != nil {
+				slog.Warn("face detect: embedding failed", "path", sourcePath, "err", embErr)
+			} else {
+				face.Embedding = recognition.EmbeddingToBytes(emb)
+			}
+		}
+
+		if _, insertErr := gdb.InsertFace(s.db, face); insertErr != nil {
+			slog.Warn("face detect: insert face failed", "photo_id", photoID, "err", insertErr)
+		}
+	}
 }
 
 // isInternalLibraryPath returns true if path equals or is a subdirectory of the

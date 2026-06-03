@@ -14,6 +14,7 @@ import (
 	"github.com/halleck/gallery/internal/config"
 	"github.com/halleck/gallery/internal/db"
 	"github.com/halleck/gallery/internal/logging"
+	"github.com/halleck/gallery/internal/recognition"
 	"github.com/halleck/gallery/internal/scan"
 )
 
@@ -54,6 +55,11 @@ func main() {
 		slog.Error("creating cache dir", "err", err)
 		os.Exit(1)
 	}
+
+	// Initialise face recognition runtime (Phase B/C).
+	// If enabled=false or models missing, server starts with recognition unavailable.
+	recogStatus := recognition.Init(cfg.FaceRecognition)
+	defer recognition.Cleanup()
 
 	if *doScan {
 		if len(cfg.LibraryPaths) == 0 {
@@ -98,7 +104,7 @@ func main() {
 		slog.Error("embedding web assets", "err", err)
 		os.Exit(1)
 	}
-	handlers := api.NewHandlers(database, cfg, *cfgPath)
+	handlers := api.NewHandlers(database, cfg, *cfgPath, recogStatus)
 	mux := http.NewServeMux()
 	handlers.RegisterRoutes(mux, http.FS(sub))
 	addr := fmt.Sprintf(":%d", *port)
