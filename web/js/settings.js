@@ -889,7 +889,17 @@ Gallery.settings = {
         const status = await Gallery.utils.api('/api/scan/status');
         if (status.running) {
           const s = status.live_stats || {};
-          const msg = `Running${status.current_label ? ' — ' + status.current_label : ''}: found ${s.found || 0}, ingested ${s.ingested || 0}…`;
+          const parts = [
+            `found:${s.found || 0}`,
+            `skipped:${s.skipped || 0}`,
+            `ingested:${s.ingested || 0}`,
+            `dupes:${s.duplicate || 0}`,
+            `errors:${s.errors || 0}`,
+          ];
+          if ((s.auto_staged || 0) > 0 || status.current_label === 'Dropzone') {
+            parts.push(`auto-staged:${s.auto_staged || 0}`);
+          }
+          const msg = `Running${status.current_label ? ' — ' + status.current_label : ''}: ${parts.join(' ')}…`;
           if (statusEl) statusEl.textContent = msg;
         } else {
           clearInterval(this.scanPollTimer);

@@ -10,6 +10,8 @@ let stagingState = {
   events: [],
 };
 
+let stagingScanPollTimer = null;
+
 Gallery.pages.staging = async function() {
   const app = document.getElementById('app');
   Gallery.utils.setActiveNav('/staging');
@@ -46,6 +48,7 @@ Gallery.pages.staging = async function() {
           </div>
           <button class="btn btn-primary" id="copy-all-btn">Copy all approved</button>
         </div>
+        <div id="staging-scan-status"></div>
         <div id="staging-copy-status"></div>
         <div id="staging-list" class="loading">Loading…</div>
       </div>
@@ -76,8 +79,58 @@ Gallery.pages.staging = async function() {
   document.getElementById('copy-all-btn').addEventListener('click', triggerCopyAll);
 
   await loadStagingList();
+  pollScanStatus();
   pollCopyStatus();
 };
+
+function renderScanStatus(status) {
+  const el = document.getElementById('staging-scan-status');
+  if (!el) return;
+  if (!status.running) {
+    const last = (status.last_runs || [])[0];
+    if (!last) {
+      el.innerHTML = '';
+      return;
+    }
+    el.innerHTML = `<div class="info-bar">Last scan: ${last.library_label || 'library'} — found:${last.files_found} skipped:${last.files_skipped} ingested:${last.files_ingested} dupes:${last.files_duplicate} errors:${last.files_error}</div>`;
+    return;
+  }
+
+  const s = status.live_stats || {};
+  const parts = [
+    `found:${s.found || 0}`,
+    `skipped:${s.skipped || 0}`,
+    `ingested:${s.ingested || 0}`,
+    `dupes:${s.duplicate || 0}`,
+    `errors:${s.errors || 0}`,
+  ];
+  if ((s.auto_staged || 0) > 0 || status.current_label === 'Dropzone') {
+    parts.push(`auto-staged:${s.auto_staged || 0}`);
+  }
+  el.innerHTML = `<div class="info-bar">Scan running${status.current_label ? ' — ' + Gallery.utils.esc(status.current_label) : ''}: ${parts.join(' ')}</div>`;
+}
+
+function pollScanStatus() {
+  if (stagingScanPollTimer) clearInterval(stagingScanPollTimer);
+  const poll = async () => {
+    try {
+      const status = await Gallery.utils.api('/api/scan/status');
+      const el = document.getElementById('staging-scan-status');
+      if (!el) {
+        if (stagingScanPollTimer) clearInterval(stagingScanPollTimer);
+        stagingScanPollTimer = null;
+        return;
+      }
+      renderScanStatus(status);
+    } catch (_) {
+      if (stagingScanPollTimer) clearInterval(stagingScanPollTimer);
+      stagingScanPollTimer = null;
+    }
+  };
+
+  poll();
+  stagingScanPollTimer = setInterval(poll, 1500);
+}
 
 async function loadStagingList() {
   const listEl = document.getElementById('staging-list');

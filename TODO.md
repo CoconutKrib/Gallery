@@ -17,3 +17,5 @@ TODO
 * Add idempotency regression test: second scan should produce zero new ingests/copies and stable face counts.
 
 * Search facets performance optimization: reduce repeated full-filter scans for `/api/search/facets` (currently query-contextual with per-facet self-filter exclusion) by moving to a single-pass aggregation strategy and/or tuned SQL + indexes for large libraries.
+
+* Scan progress feedback improvements (Settings + Staging, richer counters, optional SSE with polling fallback) - see `spec_scan_progress_feedback.md`.
