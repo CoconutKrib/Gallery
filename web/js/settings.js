@@ -1,4 +1,6 @@
-// Settings page — Phase 6: inline editing of whitelist/filters + issues panel.
+// Settings page — synchronised with Config struct and /api/settings.
+// Every field from GET /api/settings is rendered. Editable sections POST
+// only their own fields (no cross-section overwrites).
 window.Gallery = window.Gallery || {};
 Gallery.pages = Gallery.pages || {};
 
@@ -18,7 +20,10 @@ Gallery.pages.settings = async function () {
     return;
   }
 
-  // Local editable copies.
+  // Store settings on Gallery.settings so section handlers can read them.
+  Gallery.settings._data = settings;
+
+  // Local editable copies for whitelist / filters (existing pattern).
   Gallery.settings._whitelist = JSON.parse(JSON.stringify(settings.camera_whitelist || []));
   Gallery.settings._filters = JSON.parse(JSON.stringify({
     include: settings.filename_filters ? (settings.filename_filters.include || []) : [],
@@ -28,7 +33,7 @@ Gallery.pages.settings = async function () {
   const esc = Gallery.utils.esc;
   const fmt = Gallery.utils.formatDate;
 
-  // ── Library rows ──────────────────────────────────────────────────────────
+  // ── 1. Libraries ──────────────────────────────────────────────────────────
   const libraryRows = (settings.library_paths || []).map(lp => {
     const run = (scanStatus.last_runs || []).find(r => r.library_label === lp.label);
     const lastScan = run
@@ -43,19 +48,21 @@ Gallery.pages.settings = async function () {
     <div class="scan-status" id="scan-status-${esc(lp.label)}">${esc(lastScan)}</div>`;
   }).join('');
 
-  // ── Scan run rows ─────────────────────────────────────────────────────────
-  const scanRunsHtml = (scanStatus.last_runs || []).map(r =>
-    `<div class="settings-row">
-      <span class="label">${esc(r.library_label)}</span>
-      <span class="value" style="font-size:12px">
-        ${fmt(r.started_at)} — found:${r.files_found} ingested:${r.files_ingested}
-        dupes:${r.files_duplicate} errors:${r.files_error}
-        ${r.finished_at ? '' : ' <span class="pill">running</span>'}
-      </span>
-    </div>`
-  ).join('') || `<div class="settings-row"><span style="color:var(--muted)">No scans yet</span></div>`;
+  // ── 2. Internal Library ───────────────────────────────────────────────────
+  const il = settings.internal_library || {};
+  const internalLibraryHtml = `<div class="settings-section" id="section-internal-library">
+    <h2>Internal Library</h2>
+    <div class="settings-row">
+      <span class="label">Status</span>
+      <span class="value">${il.enabled ? '<span class="pill pill-ok">enabled</span>' : '<span class="pill pill-warn">disabled</span>'}</span>
+    </div>
+    <div class="settings-row">
+      <span class="label">Path</span>
+      <span class="value">${esc(il.path || '—')}</span>
+    </div>
+  </div>`;
 
-  // ── Dropzone section ─────────────────────────────────────────────────────
+  // ── 3. Dropzone ───────────────────────────────────────────────────────────
   const dropzoneSectionHtml = (() => {
     const dz = settings.dropzone;
     if (!dz) return '';
@@ -73,6 +80,163 @@ Gallery.pages.settings = async function () {
     </div>`;
   })();
 
+  // ── 6. Scan Settings (editable) ──────────────────────────────────────────
+  const scanSettingsHtml = `<div class="settings-section" id="section-scan-settings">
+    <h2>Scan Settings</h2>
+    <div class="settings-row">
+      <span class="label">Scan workers</span>
+      <input class="settings-input settings-input-sm" type="number" min="1"
+             id="ss-scan-workers" value="${settings.scan_workers || 4}" />
+    </div>
+    <div class="settings-row">
+      <span class="label">Event gap (days)</span>
+      <input class="settings-input settings-input-sm" type="number" min="1"
+             id="ss-event-gap" value="${settings.event_gap_days || 2}" />
+    </div>
+    <div class="settings-row">
+      <span class="label">Event geo (km)</span>
+      <input class="settings-input settings-input-sm" type="number" min="0.1" step="any"
+             id="ss-event-geo" value="${settings.event_geo_km || 500}" />
+    </div>
+    <div class="settings-row">
+      <span class="label">Session TTL (hours)</span>
+      <input class="settings-input settings-input-sm" type="number" min="1"
+             id="ss-session-ttl" value="${settings.session_ttl_hours || 24}" />
+    </div>
+    <div class="settings-save-row">
+      <button class="scan-btn" onclick="Gallery.settings.saveScanSettings(this)">Save</button>
+      <span id="ss-status" class="scan-status"></span>
+    </div>
+  </div>`;
+
+  // ── 7. Logging ────────────────────────────────────────────────────────────
+  const loggingHtml = `<div class="settings-section" id="section-logging">
+    <h2>Logging</h2>
+    <div class="settings-row">
+      <span class="label">Log level</span>
+      <select class="settings-input settings-input-sm" id="log-level">
+        <option value="debug"${settings.log_level === 'debug' ? ' selected' : ''}>debug</option>
+        <option value="info"${settings.log_level === 'info' ? ' selected' : ''}>info</option>
+        <option value="warn"${settings.log_level === 'warn' ? ' selected' : ''}>warn</option>
+        <option value="error"${settings.log_level === 'error' ? ' selected' : ''}>error</option>
+      </select>
+    </div>
+    <div class="settings-row">
+      <span class="label">Log file</span>
+      <input class="settings-input" type="text" id="log-file"
+             value="${esc(settings.log_file || '')}" placeholder="empty = stderr only" />
+    </div>
+    <div class="settings-save-row">
+      <button class="scan-btn" onclick="Gallery.settings.saveLogging(this)">Save</button>
+      <span id="log-status" class="scan-status"></span>
+    </div>
+    <div style="margin-top:8px;font-size:12px;color:var(--muted)">
+      ⚠ Restart the server for log changes to take effect.
+    </div>
+  </div>`;
+
+  // ── 8. Auth ───────────────────────────────────────────────────────────────
+  const authData = settings.auth || {};
+  const authHtml = `<div class="settings-section" id="section-auth">
+    <h2>Authentication</h2>
+    <div class="settings-row">
+      <span class="label">Status</span>
+      <span class="value">${authData.enabled ? '<span class="pill pill-ok">enabled</span>' : '<span class="pill pill-warn">disabled</span>'}</span>
+      <button class="scan-btn" id="auth-toggle-btn"
+              onclick="Gallery.settings.toggleAuth(this)">${authData.enabled ? 'Disable' : 'Enable'}</button>
+    </div>
+    <div id="auth-password-form" style="display:${authData.enabled ? 'block' : 'none'};margin-top:12px">
+      <div class="settings-row">
+        <span class="label">New password</span>
+        <input class="settings-input" type="password" id="new-password"
+               placeholder="Enter new password" />
+      </div>
+      <div class="settings-save-row">
+        <button class="scan-btn" onclick="Gallery.settings.changePassword(this)">Change password</button>
+        <span id="auth-pw-status" class="scan-status"></span>
+      </div>
+    </div>
+  </div>`;
+
+  // ── 9. Face Recognition ───────────────────────────────────────────────────
+  const fr = settings.face_recognition || {};
+  const faceRecognitionHtml = `<div class="settings-section" id="section-recognition">
+    <h2>Face Recognition</h2>
+    <div id="recognition-status-panel"><span style="color:var(--muted)">Loading…</span></div>
+    <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
+      <h3>Configuration</h3>
+      <div class="settings-row">
+        <span class="label">Enabled</span>
+        <label class="toggle-switch">
+          <input type="checkbox" id="fr-enabled" ${fr.enabled ? 'checked' : ''} />
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+      <div class="settings-row">
+        <span class="label">ONNX Runtime lib</span>
+        <input class="settings-input" type="text" id="fr-onnxruntime-lib"
+               value="${esc(fr.onnxruntime_lib || '')}" placeholder="path to libonnxruntime" />
+      </div>
+      <div class="settings-row">
+        <span class="label">Model dir</span>
+        <input class="settings-input" type="text" id="fr-model-dir"
+               value="${esc(fr.model_dir || '')}" placeholder="directory with .onnx models" />
+      </div>
+      <div class="settings-row">
+        <span class="label">Detection model</span>
+        <input class="settings-input" type="text" id="fr-detection-model"
+               value="${esc(fr.detection_model || '')}" placeholder="det_10g.onnx" />
+      </div>
+      <div class="settings-row">
+        <span class="label">Recognition model</span>
+        <input class="settings-input" type="text" id="fr-recognition-model"
+               value="${esc(fr.recognition_model || '')}" placeholder="w600k_r50.onnx" />
+      </div>
+      <div class="settings-row">
+        <span class="label">Detection threshold</span>
+        <input class="settings-input settings-input-sm" type="number" min="0" max="1" step="0.01"
+               id="fr-detection-threshold" value="${fr.detection_threshold ?? 0.5}" />
+      </div>
+      <div class="settings-row">
+        <span class="label">Recognition threshold</span>
+        <input class="settings-input settings-input-sm" type="number" min="0" max="1" step="0.01"
+               id="fr-recognition-threshold" value="${fr.recognition_threshold ?? 0.4}" />
+      </div>
+      <div class="settings-row">
+        <span class="label">Cluster min samples</span>
+        <input class="settings-input settings-input-sm" type="number" min="1"
+               id="fr-cluster-min-samples" value="${fr.cluster_min_samples ?? 2}" />
+      </div>
+      <div class="settings-save-row">
+        <button class="scan-btn" onclick="Gallery.settings.saveFaceRecognition(this)">Save</button>
+        <span id="fr-status" class="scan-status"></span>
+      </div>
+      <div style="margin-top:8px;font-size:12px;color:var(--muted)">
+        ⚠ Restart the server for recognition changes to take effect.
+      </div>
+    </div>
+  </div>`;
+
+  // ── 10. System (read-only) ────────────────────────────────────────────────
+  const systemHtml = `<div class="settings-section" id="section-system">
+    <h2>System</h2>
+    <div class="settings-row"><span class="label">DB path</span><span class="value">${esc(settings.db_path)}</span></div>
+    <div class="settings-row"><span class="label">Cache dir</span><span class="value">${esc(settings.cache_dir)}</span></div>
+  </div>`;
+
+  // ── 11. Recent Scans ──────────────────────────────────────────────────────
+  const scanRunsHtml = (scanStatus.last_runs || []).map(r =>
+    `<div class="settings-row">
+      <span class="label">${esc(r.library_label)}</span>
+      <span class="value" style="font-size:12px">
+        ${fmt(r.started_at)} — found:${r.files_found} ingested:${r.files_ingested}
+        dupes:${r.files_duplicate} errors:${r.files_error}
+        ${r.finished_at ? '' : ' <span class="pill">running</span>'}
+      </span>
+    </div>`
+  ).join('') || `<div class="settings-row"><span style="color:var(--muted)">No scans yet</span></div>`;
+
+  // ── Assemble page ─────────────────────────────────────────────────────────
   app.innerHTML = `<div class="settings-page">
     <h1>Settings</h1>
 
@@ -85,6 +249,7 @@ Gallery.pages.settings = async function () {
       </div>
     </div>
 
+    ${internalLibraryHtml}
     ${dropzoneSectionHtml}
 
     <div class="settings-section" id="section-whitelist">
@@ -127,23 +292,15 @@ Gallery.pages.settings = async function () {
       </div>
     </div>
 
+    ${scanSettingsHtml}
+    ${loggingHtml}
+    ${authHtml}
+    ${faceRecognitionHtml}
+    ${systemHtml}
+
     <div class="settings-section">
       <h2>Recent Scans</h2>
       ${scanRunsHtml}
-    </div>
-
-    <div class="settings-section">
-      <h2>Configuration</h2>
-      <div class="settings-row"><span class="label">DB path</span><span class="value">${esc(settings.db_path)}</span></div>
-      <div class="settings-row"><span class="label">Cache dir</span><span class="value">${esc(settings.cache_dir)}</span></div>
-      <div class="settings-row"><span class="label">Scan workers</span><span class="value">${settings.scan_workers}</span></div>
-      <div class="settings-row"><span class="label">Event gap (days)</span><span class="value">${settings.event_gap_days}</span></div>
-      <div class="settings-row"><span class="label">Event geo (km)</span><span class="value">${settings.event_geo_km}</span></div>
-    </div>
-
-    <div class="settings-section" id="section-recognition">
-      <h2>Face Recognition</h2>
-      <div id="recognition-status-panel"><span style="color:var(--muted)">Loading…</span></div>
     </div>
 
     <div class="settings-section" id="section-issues">
@@ -166,6 +323,7 @@ Gallery.settings = {
   _whitelist: [],
   _filters: { include: [], exclude: [] },
   _issuesLoaded: false,
+  _data: null,
 
   // ── Face Recognition Status ────────────────────────────────────────────────
   async loadRecognitionStatus() {
@@ -197,6 +355,132 @@ Gallery.settings = {
         <span class="value">${statusBadge}</span></div>${details}`;
     } catch (e) {
       if (panel) panel.innerHTML = `<span style="color:var(--muted)">Unavailable: ${Gallery.utils.esc(e.message)}</span>`;
+    }
+  },
+
+  // ── Scan Settings save ─────────────────────────────────────────────────────
+  async saveScanSettings(btn) {
+    btn.disabled = true;
+    const statusEl = document.getElementById('ss-status');
+    statusEl.textContent = 'Saving…';
+    try {
+      const scanWorkers = parseInt(document.getElementById('ss-scan-workers').value, 10);
+      const eventGapDays = parseInt(document.getElementById('ss-event-gap').value, 10);
+      const eventGeoKm = parseFloat(document.getElementById('ss-event-geo').value);
+      const sessionTtlHours = parseInt(document.getElementById('ss-session-ttl').value, 10);
+      const body = {};
+      if (scanWorkers > 0) body.scan_workers = scanWorkers;
+      if (eventGapDays > 0) body.event_gap_days = eventGapDays;
+      if (eventGeoKm > 0) body.event_geo_km = eventGeoKm;
+      if (sessionTtlHours > 0) body.session_ttl_hours = sessionTtlHours;
+      await Gallery.utils.api('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      statusEl.textContent = 'Saved.';
+    } catch (err) {
+      statusEl.textContent = 'Error: ' + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  },
+
+  // ── Logging save ───────────────────────────────────────────────────────────
+  async saveLogging(btn) {
+    btn.disabled = true;
+    const statusEl = document.getElementById('log-status');
+    statusEl.textContent = 'Saving…';
+    try {
+      const logLevel = document.getElementById('log-level').value;
+      const logFile = document.getElementById('log-file').value;
+      await Gallery.utils.api('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ log_level: logLevel, log_file: logFile }),
+      });
+      statusEl.textContent = 'Saved.';
+    } catch (err) {
+      statusEl.textContent = 'Error: ' + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  },
+
+  // ── Auth toggle ────────────────────────────────────────────────────────────
+  async toggleAuth(btn) {
+    btn.disabled = true;
+    const data = Gallery.settings._data;
+    const newEnabled = !data.auth.enabled;
+    try {
+      await Gallery.utils.api('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ auth_enabled: newEnabled }),
+      });
+      data.auth.enabled = newEnabled;
+      const badge = btn.parentElement.querySelector('.value');
+      badge.innerHTML = newEnabled ? '<span class="pill pill-ok">enabled</span>' : '<span class="pill pill-warn">disabled</span>';
+      btn.textContent = newEnabled ? 'Disable' : 'Enable';
+      document.getElementById('auth-password-form').style.display = newEnabled ? 'block' : 'none';
+    } catch (err) {
+      alert('Error: ' + err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  },
+
+  // ── Password change ────────────────────────────────────────────────────────
+  async changePassword(btn) {
+    btn.disabled = true;
+    const statusEl = document.getElementById('auth-pw-status');
+    const pwInput = document.getElementById('new-password');
+    const pw = pwInput.value;
+    if (!pw) { pwInput.focus(); btn.disabled = false; return; }
+    statusEl.textContent = 'Saving…';
+    try {
+      await Gallery.utils.api('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ new_password: pw }),
+      });
+      statusEl.textContent = 'Password changed.';
+      pwInput.value = '';
+    } catch (err) {
+      statusEl.textContent = 'Error: ' + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  },
+
+  // ── Face Recognition config save ───────────────────────────────────────────
+  async saveFaceRecognition(btn) {
+    btn.disabled = true;
+    const statusEl = document.getElementById('fr-status');
+    statusEl.textContent = 'Saving…';
+    try {
+      const body = {
+        face_recognition: {
+          enabled: document.getElementById('fr-enabled').checked,
+          onnxruntime_lib: document.getElementById('fr-onnxruntime-lib').value,
+          model_dir: document.getElementById('fr-model-dir').value,
+          detection_model: document.getElementById('fr-detection-model').value,
+          recognition_model: document.getElementById('fr-recognition-model').value,
+          detection_threshold: parseFloat(document.getElementById('fr-detection-threshold').value) || 0.5,
+          recognition_threshold: parseFloat(document.getElementById('fr-recognition-threshold').value) || 0.4,
+          cluster_min_samples: parseInt(document.getElementById('fr-cluster-min-samples').value, 10) || 2,
+        },
+      };
+      await Gallery.utils.api('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      statusEl.textContent = 'Saved.';
+    } catch (err) {
+      statusEl.textContent = 'Error: ' + err.message;
+    } finally {
+      btn.disabled = false;
     }
   },
 

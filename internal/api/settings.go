@@ -9,7 +9,7 @@ import (
 )
 
 func (h *Handlers) handleGetSettings(w http.ResponseWriter, r *http.Request) {
-	// Return config without sensitive fields.
+	// Return config without sensitive fields (password_hash, session_secret omitted).
 	writeJSON(w, http.StatusOK, map[string]any{
 		"library_paths":    h.cfg.LibraryPaths,
 		"camera_whitelist": h.cfg.CameraWhitelist,
@@ -19,12 +19,15 @@ func (h *Handlers) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		},
 		"db_path":           h.cfg.DBPath,
 		"cache_dir":         h.cfg.CacheDir,
+		"log_file":          h.cfg.LogFile,
+		"log_level":         h.cfg.LogLevel,
 		"scan_workers":      h.cfg.ScanWorkers,
 		"event_gap_days":    h.cfg.EventGapDays,
 		"event_geo_km":      h.cfg.EventGeoKm,
 		"session_ttl_hours": h.cfg.SessionTTLHours,
 		"internal_library":  h.cfg.InternalLibrary,
 		"dropzone":          h.cfg.Dropzone,
+		"face_recognition":  h.cfg.FaceRecognition,
 	})
 }
 
@@ -35,8 +38,12 @@ type settingsUpdateRequest struct {
 	ScanWorkers     *int                          `json:"scan_workers"`
 	EventGapDays    *int                          `json:"event_gap_days"`
 	EventGeoKm      *float64                      `json:"event_geo_km"`
+	SessionTTLHours *int                          `json:"session_ttl_hours"`
+	LogFile         *string                       `json:"log_file"`
+	LogLevel        *string                       `json:"log_level"`
 	InternalLibrary *config.InternalLibraryConfig `json:"internal_library"`
 	Dropzone        *config.DropzoneConfig        `json:"dropzone"`
+	FaceRecognition *config.FaceRecognitionConfig `json:"face_recognition"`
 	// Auth password change.
 	NewPassword *string `json:"new_password"`
 	AuthEnabled *bool   `json:"auth_enabled"`
@@ -67,11 +74,29 @@ func (h *Handlers) handlePostSettings(w http.ResponseWriter, r *http.Request) {
 	if req.EventGeoKm != nil && *req.EventGeoKm > 0 {
 		h.cfg.EventGeoKm = *req.EventGeoKm
 	}
+	if req.SessionTTLHours != nil && *req.SessionTTLHours > 0 {
+		h.cfg.SessionTTLHours = *req.SessionTTLHours
+	}
+	if req.LogFile != nil {
+		h.cfg.LogFile = *req.LogFile
+	}
+	if req.LogLevel != nil {
+		// Validate log level against allowed values.
+		validLevels := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}
+		if !validLevels[*req.LogLevel] {
+			writeError(w, http.StatusBadRequest, "invalid log_level: must be one of debug, info, warn, error")
+			return
+		}
+		h.cfg.LogLevel = *req.LogLevel
+	}
 	if req.InternalLibrary != nil {
 		h.cfg.InternalLibrary = *req.InternalLibrary
 	}
 	if req.Dropzone != nil {
 		h.cfg.Dropzone = *req.Dropzone
+	}
+	if req.FaceRecognition != nil {
+		h.cfg.FaceRecognition = *req.FaceRecognition
 	}
 	if req.AuthEnabled != nil {
 		h.cfg.Auth.Enabled = *req.AuthEnabled

@@ -1144,6 +1144,4 @@ textarea.form-input { resize: vertical; }
 
 /* Modal */
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; z-index: 200; }
-.modal-box { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 24px; min-width: 320px; max-width: 480px; width: 90%; }
-.modal-box h2 { margin: 0 0 16px; font-size: 16px; }
 

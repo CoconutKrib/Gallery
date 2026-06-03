@@ -54,9 +54,10 @@ Gallery.router = (() => {
   // Initial dispatch and settings bootstrap.
   document.addEventListener('DOMContentLoaded', async () => {
     // Load settings once to know if internal library is enabled.
+    // Store on _data so we don't clobber the settings page module (settings.js).
     try {
       const s = await Gallery.utils.api('/api/settings');
-      Gallery.settings = s;
+      Gallery.settings._data = s;
       if (s.internal_library && s.internal_library.enabled) {
         document.body.classList.add('library-enabled');
       }
