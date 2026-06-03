@@ -24,7 +24,7 @@ var webFS embed.FS
 func main() {
 	cfgPath := flag.String("config", "./config.json", "path to config.json")
 	port := flag.Int("port", 8080, "HTTP port to listen on")
-	doScan := flag.Bool("scan", false, "run a scan of all library paths and exit")
+	doScan := flag.Bool("scan", false, "run a scan of all configured scan paths and exit")
 	flag.Parse()
 
 	cfg, err := config.Load(*cfgPath)
@@ -63,7 +63,7 @@ func main() {
 
 	if *doScan {
 		if len(cfg.LibraryPaths) == 0 {
-			slog.Error("no library_paths configured in config.json")
+			slog.Error("no scan_paths configured in config.json")
 			os.Exit(1)
 		}
 		for _, lp := range cfg.LibraryPaths {

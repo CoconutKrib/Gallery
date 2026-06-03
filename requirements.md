@@ -37,7 +37,7 @@ A locally-runnable photo management and gallery web application for a single fam
 
 Stores settings that should be human-readable and editable outside the app:
 
-- **`library_paths`** — list of root directories to scan. Each entry has:
+- **`scan_paths`** — list of root directories to scan. Each entry has:
   - `path` (string)
   - `label` (string, user-defined name)
 - **`camera_whitelist`** — list of `{ make, model }` objects (strings, case-insensitive match against EXIF). Serial number matching is optional/future.
@@ -170,7 +170,7 @@ Tracks every filepath where a given hash has been found (beyond the canonical on
 
 Unique constraint on `(sha256, filepath)` — ensures a rescan never creates duplicate rows for the same file at the same location.
 
-### `library_paths`
+### `scan_paths`
 | Column | Type | Notes |
 |---|---|---|
 | `id` | INTEGER PK | |

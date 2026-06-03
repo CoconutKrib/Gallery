@@ -45,6 +45,7 @@ go run . --config test_config.json --scan
 - **Security**: all file serving validates paths are within configured library roots or cache dir (`pathIsWithinRoots`). Never serve arbitrary filesystem paths.
 - **Auth middleware** — no-op when `auth.enabled = false`. API routes 401, page routes redirect to `/login`.
 - **Filename filters are case-insensitive** — all include/exclude regex patterns are automatically wrapped with `(?i)` at compile time (`caseInsensitivePattern()` in `scanner.go`). Exclude beats include: if both lists are configured, a file must pass include first, then not match any exclude.
+- **Config key compatibility** — canonical config key is `scan_paths`; legacy `library_paths` is still accepted on load and mapped to the same field (`Config.UnmarshalJSON`).
 - **Logging — always use `log/slog`, never `log.Printf`**. The global default logger is initialised by `logging.Setup()` in `main.go` (writes to stderr + optional `log_file`). Use structured key-value attributes, not `%v` format strings:
   ```go
   slog.Info("scan: done", "path", lp.Path, "found", stats.Found, "errors", stats.Errors)
@@ -53,6 +54,7 @@ go run . --config test_config.json --scan
   ```
   Level guide: `Info` for normal milestones, `Warn` for recoverable problems (single file failures), `Error` for failures that affect correctness. `Debug` for verbose detail useful only when diagnosing. All HTTP requests are logged automatically by `logging.HTTPMiddleware` — do not log them manually in handlers. Never import `"log"` in new files; always import `"log/slog"`.
 - **Internal library** — when `internal_library.enabled = true`, `config.Validate()` checks that the library path does not overlap any scan library path or dropzone path. `scanner.go` skips any walk subtree that is inside `internal_library.path` (via `isInternalLibraryPath()`). All staging/library/people APIs return `409 Conflict` if `internal_library.enabled = false`. The body class `library-enabled` is set at startup by `app.js` and controls CSS visibility of Stage buttons and the People/Face-Review nav links (via `.nav-library-only` class).
+- **Settings API update semantics** — `POST /api/settings` supports partial updates by section; handlers should only send fields they intend to change so unrelated config is not overwritten.
 
 ## Project structure
 
@@ -122,7 +124,7 @@ web/
     map.js                     # Leaflet map, all pins + radius search with circle overlay
     events.js                  # Event list cards + event detail photo grid
     dedup.js                   # Per-library summary, cross-library overlap, subtree analyser
-    settings.js                # Library paths, scan trigger/poll, config display
+    settings.js                # Full config editor: scan dirs, filters, scan/event/log/auth/recognition settings, status panels
     staging.js                 # Staging queue: two-panel review UI with annotation form
     library.js                 # Internal library browse: sidebar tree + filter bar + photo grid; edit panel (title/description/tags/dates/event); remove-with-confirmation; people/face-tagging panel
     people.js                  # /people list, /people/{id} detail (edit + merge), /faces/review (two-panel cluster+suggestion UI)
@@ -149,6 +151,7 @@ samples/
   - **Phase A (manual tagging)**: `people` + extended `faces` schema (migration `004_people.sql`), full CRUD API (`/api/people`, `/api/library/copies/{id}/faces`, `/api/faces/*`), tagging panel in `library.js`, `/people` browse + detail pages with merge action.
   - **Phase B (auto face detection)**: `internal/recognition` package (SCRFD + ArcFace ONNX sessions via `onnxruntime_go`); scanner auto-detects faces and stores bounding boxes + 512-dim embeddings per photo; `GET /api/recognition/status` endpoint; recognition-gated 501/503 responses.
   - **Phase C (identity clustering + review UI)**: Post-scan suggestion pipeline (per-person mean embedding nearest-neighbour matching) + union-find clustering of unidentified faces; in-memory cluster store; `/api/faces/unidentified`, `/api/faces/suggestions`, `/api/faces/cluster` endpoints; `/faces/review` two-panel UI; recognition status section in Settings.
+- ✅ **Phase 11** — Settings synchronization overhaul: settings page reorganised into editable sections mapped to current `Config` fields (scan paths, whitelist, filename filters, scan/event tuning, logging, auth, face recognition), with section-local save actions using partial `POST /api/settings` payloads.
 
 ## Known issues / backlog (from TODO.md)
 

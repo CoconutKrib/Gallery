@@ -12,7 +12,7 @@
 
 | Config field | GET `/api/settings` | POST `/api/settings` | UI display | UI editable |
 |---|---|---|---|---|
-| `library_paths` | ✅ | ✅ | ✅ scan buttons | — |
+| `scan_paths` | ✅ | ✅ | ✅ scan buttons | — |
 | `camera_whitelist` | ✅ | ✅ | ✅ | ✅ |
 | `filename_filters` | ✅ | ✅ | ✅ | ✅ |
 | `auth.enabled` | ✅ | ✅ (as `auth_enabled`) | ❌ missing | ❌ missing |
@@ -40,7 +40,7 @@ Return **all** non-sensitive config fields. Sensitive fields (`password_hash`, `
 
 ```json
 {
-  "library_paths": [...],
+  "scan_paths": [...],
   "camera_whitelist": [...],
   "filename_filters": { "include": [...], "exclude": [...] },
   "auth": { "enabled": false },

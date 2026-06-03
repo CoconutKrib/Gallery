@@ -24,6 +24,7 @@ Gallery.pages.settings = async function () {
   Gallery.settings._data = settings;
 
   // Local editable copies for whitelist / filters (existing pattern).
+  Gallery.settings._scanPaths = JSON.parse(JSON.stringify(settings.scan_paths || settings.library_paths || []));
   Gallery.settings._whitelist = JSON.parse(JSON.stringify(settings.camera_whitelist || []));
   Gallery.settings._filters = JSON.parse(JSON.stringify({
     include: settings.filename_filters ? (settings.filename_filters.include || []) : [],
@@ -33,20 +34,7 @@ Gallery.pages.settings = async function () {
   const esc = Gallery.utils.esc;
   const fmt = Gallery.utils.formatDate;
 
-  // ── 1. Libraries ──────────────────────────────────────────────────────────
-  const libraryRows = (settings.library_paths || []).map(lp => {
-    const run = (scanStatus.last_runs || []).find(r => r.library_label === lp.label);
-    const lastScan = run
-      ? `Last scan: ${fmt(run.started_at)} — ${run.files_ingested} ingested, ${run.files_duplicate} dupes`
-      : 'Never scanned';
-    return `<div class="settings-row">
-      <span class="label">${esc(lp.label || lp.path)}</span>
-      <span class="value" style="font-size:12px;color:var(--muted)">${esc(lp.path)}</span>
-      <button class="scan-btn" data-path-label="${esc(lp.label)}"
-              onclick="Gallery.settings.triggerScan(this)">Scan</button>
-    </div>
-    <div class="scan-status" id="scan-status-${esc(lp.label)}">${esc(lastScan)}</div>`;
-  }).join('');
+  // ── 1. Scan Directories ───────────────────────────────────────────────────
 
   // ── 2. Internal Library ───────────────────────────────────────────────────
   const il = settings.internal_library || {};
@@ -241,10 +229,19 @@ Gallery.pages.settings = async function () {
     <h1>Settings</h1>
 
     <div class="settings-section">
-      <h2>Libraries</h2>
-      ${libraryRows || '<div class="settings-row"><span style="color:var(--muted)">No libraries configured</span></div>'}
-      <div style="margin-top:12px">
-        <button class="scan-btn" onclick="Gallery.settings.triggerScanAll(this)">Scan All Libraries</button>
+      <h2>Scan Directories</h2>
+      <div id="scan-paths-list"></div>
+      <div class="settings-add-row">
+        <input id="sp-label" class="settings-input" placeholder="Label (e.g. Family Photos)" />
+        <input id="sp-path" class="settings-input" placeholder="Path (e.g. /home/you/Pictures)" />
+        <button class="settings-add-btn" onclick="Gallery.settings.scanPathAdd()">Add</button>
+      </div>
+      <div class="settings-save-row">
+        <button class="scan-btn" onclick="Gallery.settings.saveScanPaths(this)">Save Scan Directories</button>
+        <span id="sp-status" class="scan-status"></span>
+      </div>
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+        <button class="scan-btn" onclick="Gallery.settings.triggerScanAll(this)">Scan All Directories</button>
         <span id="scan-all-status" class="scan-status"></span>
       </div>
     </div>
@@ -313,6 +310,7 @@ Gallery.pages.settings = async function () {
   </div>`;
 
   Gallery.settings.renderWhitelist();
+  Gallery.settings.renderScanPaths(scanStatus.last_runs || []);
   Gallery.settings.renderFilters();
   Gallery.settings.loadRecognitionStatus();
 };
@@ -321,9 +319,86 @@ Gallery.pages.settings = async function () {
 Gallery.settings = {
   scanPollTimer: null,
   _whitelist: [],
+  _scanPaths: [],
   _filters: { include: [], exclude: [] },
   _issuesLoaded: false,
   _data: null,
+
+  // ── Scan directories ─────────────────────────────────────────────────────
+  renderScanPaths(lastRuns) {
+    const list = document.getElementById('scan-paths-list');
+    if (!list) return;
+
+    const runs = Array.isArray(lastRuns) ? lastRuns : [];
+    if (this._scanPaths.length === 0) {
+      list.innerHTML = `<div class="settings-row"><span style="color:var(--muted)">No scan directories configured</span></div>`;
+      return;
+    }
+
+    list.innerHTML = this._scanPaths.map((sp, i) => {
+      const label = (sp.label || '').trim();
+      const run = runs.find(r => r.library_label === label);
+      const lastScan = run
+        ? `Last scan: ${Gallery.utils.formatDate(run.started_at)} — ${run.files_ingested} ingested, ${run.files_duplicate} dupes`
+        : 'Never scanned';
+      return `<div class="settings-row">
+        <input class="settings-input" value="${Gallery.utils.esc(sp.label || '')}"
+               placeholder="Label" onchange="Gallery.settings.scanPathUpdate(${i}, 'label', this.value)" />
+        <input class="settings-input" value="${Gallery.utils.esc(sp.path || '')}"
+               placeholder="Path" onchange="Gallery.settings.scanPathUpdate(${i}, 'path', this.value)" />
+        <button class="settings-del-btn" onclick="Gallery.settings.scanPathRemove(${i})" title="Remove">✕</button>
+      </div>
+      <div class="scan-status">${Gallery.utils.esc(lastScan)}</div>`;
+    }).join('');
+  },
+
+  scanPathAdd() {
+    const labelEl = document.getElementById('sp-label');
+    const pathEl = document.getElementById('sp-path');
+    const label = (labelEl.value || '').trim();
+    const path = (pathEl.value || '').trim();
+    if (!path) {
+      pathEl.focus();
+      return;
+    }
+    this._scanPaths.push({ label, path });
+    labelEl.value = '';
+    pathEl.value = '';
+    this.renderScanPaths();
+  },
+
+  scanPathUpdate(i, field, value) {
+    if (!this._scanPaths[i]) return;
+    this._scanPaths[i][field] = (value || '').trim();
+  },
+
+  scanPathRemove(i) {
+    this._scanPaths.splice(i, 1);
+    this.renderScanPaths();
+  },
+
+  async saveScanPaths(btn) {
+    btn.disabled = true;
+    const statusEl = document.getElementById('sp-status');
+    statusEl.textContent = 'Saving…';
+    try {
+      const cleaned = this._scanPaths
+        .map(sp => ({ label: (sp.label || '').trim(), path: (sp.path || '').trim() }))
+        .filter(sp => sp.path !== '');
+      await Gallery.utils.api('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scan_paths: cleaned }),
+      });
+      this._scanPaths = cleaned;
+      this.renderScanPaths();
+      statusEl.textContent = 'Saved.';
+    } catch (err) {
+      statusEl.textContent = 'Error: ' + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  },
 
   // ── Face Recognition Status ────────────────────────────────────────────────
   async loadRecognitionStatus() {

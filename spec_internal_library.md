@@ -129,7 +129,7 @@ New keys in the existing `Config` struct:
 }
 ```
 
-- `internal_library.path` must not overlap with any `library_paths` or the `dropzone.path` — validated at startup.
+- `internal_library.path` must not overlap with any `scan_paths` or the `dropzone.path` — validated at startup.
 - When `enabled: false`, the path is ignored and all copy/staging APIs return `409 Conflict` with a clear message.
 
 ---

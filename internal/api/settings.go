@@ -11,6 +11,7 @@ import (
 func (h *Handlers) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	// Return config without sensitive fields (password_hash, session_secret omitted).
 	writeJSON(w, http.StatusOK, map[string]any{
+		"scan_paths":       h.cfg.LibraryPaths,
 		"library_paths":    h.cfg.LibraryPaths,
 		"camera_whitelist": h.cfg.CameraWhitelist,
 		"filename_filters": h.cfg.FilenameFilters,
@@ -32,6 +33,7 @@ func (h *Handlers) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 type settingsUpdateRequest struct {
+	ScanPaths       *[]config.LibraryPath         `json:"scan_paths"`
 	LibraryPaths    *[]config.LibraryPath         `json:"library_paths"`
 	CameraWhitelist *[]config.CameraEntry         `json:"camera_whitelist"`
 	FilenameFilters *config.FilenameFilters       `json:"filename_filters"`
@@ -56,7 +58,9 @@ func (h *Handlers) handlePostSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.LibraryPaths != nil {
+	if req.ScanPaths != nil {
+		h.cfg.LibraryPaths = *req.ScanPaths
+	} else if req.LibraryPaths != nil {
 		h.cfg.LibraryPaths = *req.LibraryPaths
 	}
 	if req.CameraWhitelist != nil {

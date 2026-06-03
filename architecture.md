@@ -139,7 +139,7 @@ gallery/
 
 ```go
 type Config struct {
-    LibraryPaths    []LibraryPath          `json:"library_paths"`
+    LibraryPaths    []LibraryPath          `json:"scan_paths"`
     CameraWhitelist []CameraEntry          `json:"camera_whitelist"`
     FilenameFilters FilenameFilters        `json:"filename_filters"`
     InternalLibrary InternalLibraryConfig  `json:"internal_library"`

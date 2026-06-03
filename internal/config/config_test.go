@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -84,5 +85,38 @@ func TestValidate_DropzoneDisabled_NoError(t *testing.T) {
 	}
 	if err := Validate(cfg); err != nil {
 		t.Errorf("expected no error when dropzone disabled, got: %v", err)
+	}
+}
+
+func TestUnmarshalJSON_LegacyLibraryPathsFallback(t *testing.T) {
+	cfg := defaults()
+	data := []byte(`{"library_paths":[{"path":"/legacy","label":"Legacy"}]}`)
+
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unexpected unmarshal error: %v", err)
+	}
+	if len(cfg.LibraryPaths) != 1 {
+		t.Fatalf("expected 1 library path, got %d", len(cfg.LibraryPaths))
+	}
+	if cfg.LibraryPaths[0].Path != "/legacy" {
+		t.Fatalf("expected legacy path to be loaded, got %q", cfg.LibraryPaths[0].Path)
+	}
+}
+
+func TestUnmarshalJSON_ScanPathsPreferredOverLegacy(t *testing.T) {
+	cfg := defaults()
+	data := []byte(`{
+		"scan_paths":[{"path":"/scan","label":"Scan"}],
+		"library_paths":[{"path":"/legacy","label":"Legacy"}]
+	}`)
+
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unexpected unmarshal error: %v", err)
+	}
+	if len(cfg.LibraryPaths) != 1 {
+		t.Fatalf("expected 1 scan path, got %d", len(cfg.LibraryPaths))
+	}
+	if cfg.LibraryPaths[0].Path != "/scan" {
+		t.Fatalf("expected scan_paths to take precedence, got %q", cfg.LibraryPaths[0].Path)
 	}
 }

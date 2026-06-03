@@ -57,7 +57,7 @@ type FaceRecognitionConfig struct {
 }
 
 type Config struct {
-	LibraryPaths    []LibraryPath         `json:"library_paths"`
+	LibraryPaths    []LibraryPath         `json:"scan_paths"`
 	CameraWhitelist []CameraEntry         `json:"camera_whitelist"`
 	FilenameFilters FilenameFilters       `json:"filename_filters"`
 	Auth            AuthConfig            `json:"auth"`
@@ -72,6 +72,35 @@ type Config struct {
 	InternalLibrary InternalLibraryConfig `json:"internal_library"`
 	Dropzone        DropzoneConfig        `json:"dropzone"`
 	FaceRecognition FaceRecognitionConfig `json:"face_recognition"`
+}
+
+// UnmarshalJSON supports the new scan_paths key while remaining backward
+// compatible with the legacy library_paths key.
+func (c *Config) UnmarshalJSON(data []byte) error {
+	type configAlias Config
+
+	base := configAlias(*c)
+	if err := json.Unmarshal(data, &base); err != nil {
+		return err
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	if _, hasScanPaths := raw["scan_paths"]; !hasScanPaths {
+		if legacyJSON, hasLegacy := raw["library_paths"]; hasLegacy {
+			var legacyPaths []LibraryPath
+			if err := json.Unmarshal(legacyJSON, &legacyPaths); err != nil {
+				return err
+			}
+			base.LibraryPaths = legacyPaths
+		}
+	}
+
+	*c = Config(base)
+	return nil
 }
 
 func defaults() Config {
@@ -135,7 +164,7 @@ func Save(path string, cfg *Config) error {
 }
 
 // Validate checks configuration constraints. Returns a non-nil error if the
-// config is invalid (e.g. internal library path overlaps a scan library path).
+// config is invalid (e.g. internal library path overlaps a scan source path).
 func Validate(cfg *Config) error {
 	if !cfg.InternalLibrary.Enabled || cfg.InternalLibrary.Path == "" {
 		return nil
