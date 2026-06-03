@@ -83,6 +83,21 @@ func (h *Handlers) RegisterRoutes(mux *http.ServeMux, staticFS http.FileSystem) 
 	api("PATCH", "/api/library/copies/{id}", h.handleLibraryCopyPatch)
 	api("DELETE", "/api/library/copies/{id}", h.handleLibraryCopyDelete)
 
+	// People and face tagging.
+	api("GET", "/api/people", h.handleListPeople)
+	api("POST", "/api/people", h.handleCreatePerson)
+	api("GET", "/api/people/{id}", h.handleGetPerson)
+	api("PATCH", "/api/people/{id}", h.handlePatchPerson)
+	api("DELETE", "/api/people/{id}", h.handleDeletePerson)
+	api("GET", "/api/people/{id}/photos", h.handlePersonPhotos)
+	api("GET", "/api/library/copies/{id}/faces", h.handleListFaces)
+	api("POST", "/api/library/copies/{id}/faces", h.handleCreateFace)
+	api("PATCH", "/api/faces/{id}", h.handlePatchFace)
+	api("DELETE", "/api/faces/{id}", h.handleDeleteFace)
+
+	// Recognition status (always available; returns available=false until Phase B/C).
+	api("GET", "/api/recognition/status", h.handleRecognitionStatus)
+
 	// Static assets.
 	static := http.FileServer(staticFS)
 	mux.HandleFunc("GET /css/", h.authMiddleware(static.ServeHTTP))

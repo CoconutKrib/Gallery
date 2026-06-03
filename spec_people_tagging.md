@@ -19,11 +19,11 @@ are present. No separate "AI build" is required.
 
 ## Deployment Phases
 
-| Phase | What ships | Runtime requirement |
-|---|---|---|
-| **A — Manual tagging** | `people` table, extended `faces`, full CRUD API, tagging UI on library photo detail, `/people` browse page | None — no extra libraries or models needed |
-| **B — Face detection** | Auto-populate `faces` rows with bounding boxes during scan; user confirms/removes and assigns people | `libonnxruntime.so` + SCRFD detection model |
-| **C — Face recognition** | Embedding extraction, identity clustering, suggestion pipeline, review UI | `libonnxruntime.so` + SCRFD detection model + ArcFace embedding model |
+| Phase | What ships | Runtime requirement | Status |
+|---|---|---|---|
+| **A — Manual tagging** | `people` table, extended `faces`, full CRUD API, tagging UI on library photo detail, `/people` browse page | None — no extra libraries or models needed | ✅ **Complete** |
+| **B — Face detection** | Auto-populate `faces` rows with bounding boxes during scan; user confirms/removes and assigns people | `libonnxruntime.so` + SCRFD detection model | Not started |
+| **C — Face recognition** | Embedding extraction, identity clustering, suggestion pipeline, review UI | `libonnxruntime.so` + SCRFD detection model + ArcFace embedding model | Not started |
 
 **Single binary:** there is only one build target — `go build ./...`. The
 `internal/recognition` package is always compiled in (it requires CGO, so a C
@@ -317,14 +317,22 @@ a C compiler (standard on Linux/macOS), not the onnxruntime library itself.
 | File | Purpose |
 |---|---|
 | `recognition.go` | `Status` struct; `Init(cfg) Status`; `IsAvailable() bool`; package-level singleton |
-| `detect.go` | Load SCRFD ONNX session; `Detect(img) ([]Detection, error)` |
-| `embed.go` | Load ArcFace/R50 ONNX session; `Embed(img, Detection) ([]float32, error)` |
+| `detect.go` | SCRFD session; `Detect(img image.Image, threshold float32) ([]Detection, error)` — returns pixel-space boxes + 5 keypoints |
+| `embed.go` | ArcFace session; `Embed(img image.Image, det Detection) ([]float32, error)` — returns L2-normalised 512-dim vector |
 | `cluster.go` | Pure Go — cosine similarity matrix + agglomerative clustering; no CGO; `Cluster(faces []FaceEmbedding) []FaceCluster` |
 | `suggest.go` | Pure Go — `Suggest(unidentified, personMeans []FaceEmbedding, threshold float64) []Suggestion` |
 
 `Init(cfg FaceRecognitionConfig) Status` is called once at server startup:
 
 ```go
+// Detection is returned by Detect() in pixel coordinates of the 640×640 input.
+// Caller must scale back to original image dimensions before storing bbox_*.
+type Detection struct {
+    X1, Y1, X2, Y2 float32   // bounding box (pixels, 640×640 space)
+    Score           float32   // confidence, already a probability (0–1)
+    Kps             [5][2]float32  // facial keypoints (optional; for alignment)
+}
+
 type Status struct {
     Available         bool
     ExecutionProvider string  // "CUDA", "CPU", or ""
@@ -342,6 +350,142 @@ Init sequence:
 The returned `Status` is stored in the `Handlers` struct and served by
 `GET /api/recognition/status`. Callers in `scanner.go` and `scan.go` check
 `recognition.IsAvailable()` before invoking any inference.
+
+### Recognition package — implementation notes (verified in spike)
+
+These details were confirmed by running the `_exploration/onnxruntime_spike` against
+`buffalo_l` v2+ models. They must be followed exactly in `detect.go` and `embed.go`.
+
+#### Image preprocessing (shared by both models)
+
+```go
+// Resize to (w, h) with bilinear interpolation, then convert to float32 CHW.
+// BGR channel ordering (InsightFace convention — NOT RGB).
+// Normalisation: (pixel_value - 127.5) / 128.0
+//
+// Layout in the flat slice: C × H × W, channel-first.
+// For a 640×640 input the slice length is 3 × 640 × 640 = 1,228,800.
+
+idx := y*w + x
+data[0*h*w+idx] = (float32(b) - 127.5) / 128.0  // B channel
+data[1*h*w+idx] = (float32(g) - 127.5) / 128.0  // G channel
+data[2*h*w+idx] = (float32(r) - 127.5) / 128.0  // R channel
+```
+
+#### `detect.go` — SCRFD-10GF session
+
+```
+Input node : "input.1"   shape [1, 3, 640, 640]  float32
+```
+
+The model outputs **9 tensors grouped by type, then by stride** (not grouped by
+stride). The slice order passed to `ort.NewAdvancedSession` must match this layout:
+
+| Tensor variable | Node name (buffalo_l v2+) | Shape (640×640 input) | Content |
+|---|---|---|---|
+| `score8`  | `"448"` | [12800, 1] | per-anchor confidence, stride 8 |
+| `score16` | `"471"` | [ 3200, 1] | per-anchor confidence, stride 16 |
+| `score32` | `"494"` | [  800, 1] | per-anchor confidence, stride 32 |
+| `bbox8`   | `"451"` | [12800, 4] | (dx1,dy1,dx2,dy2) offsets, stride 8 |
+| `bbox16`  | `"474"` | [ 3200, 4] | (dx1,dy1,dx2,dy2) offsets, stride 16 |
+| `bbox32`  | `"497"` | [  800, 4] | (dx1,dy1,dx2,dy2) offsets, stride 32 |
+| `kps8`    | `"454"` | [12800, 10] | 5 keypoints × 2 coords, stride 8 |
+| `kps16`   | `"477"` | [ 3200, 10] | 5 keypoints × 2 coords, stride 16 |
+| `kps32`   | `"500"` | [  800, 10] | 5 keypoints × 2 coords, stride 32 |
+
+```go
+inputNames  := []string{"input.1"}
+outputNames := []string{
+    "448", "471", "494",   // scores:  stride 8, 16, 32
+    "451", "474", "497",   // bboxes:  stride 8, 16, 32
+    "454", "477", "500",   // kps:     stride 8, 16, 32
+}
+session, err := ort.NewAdvancedSession(modelPath,
+    inputNames, outputNames,
+    []ort.Value{inputTensor},
+    []ort.Value{score8, score16, score32, bbox8, bbox16, bbox32, kps8, kps16, kps32},
+    nil,
+)
+```
+
+**⚠️ Scores are already probabilities.** `det_10g.onnx` from buffalo_l has sigmoid
+baked into the score outputs. Values are in [0, 1]. **Do NOT apply sigmoid again** —
+doing so maps near-zero background scores to ~0.5, producing thousands of false
+detections. Compare `score` directly against `cfg.DetectionThreshold`.
+
+Output node names differ between buffalo_l versions. If the session fails with
+`"invalid node output name"`, inspect the model:
+
+```bash
+python3 -c "import onnx; m=onnx.load('det_10g.onnx'); print([n.name for n in m.graph.output])"
+```
+
+#### `embed.go` — ArcFace/R50 session
+
+```
+Input node  : "input.1"   shape [1, 3, 112, 112]  float32
+Output node : "683"        shape [1, 512]           float32
+```
+
+```go
+session, err := ort.NewAdvancedSession(modelPath,
+    []string{"input.1"},
+    []string{"683"},
+    []ort.Value{inputTensor},
+    []ort.Value{outputTensor},
+    nil,
+)
+```
+
+After inference, **L2-normalise** the 512-dim vector before storing or comparing:
+
+```go
+// norm = sqrt(sum(x²))
+// embedding[i] /= norm
+```
+
+The cosine similarity between two L2-normalised vectors is simply their dot product.
+Observed threshold for same-person match with `w600k_r50`: cosine similarity ≥ 0.40
+(distance ≤ 0.60). The config default of 0.35 is conservative; tuning upward reduces
+false positives.
+
+#### Observed performance (CPU, WSL2, no GPU)
+
+| Operation | Time |
+|---|---|
+| SCRFD detection (640×640) | ~42 ms |
+| ArcFace embedding (112×112, per face) | ~400–660 ms |
+
+GPU (CUDA) reduces embedding to ~30 ms per face. For large libraries, GPU is strongly
+recommended; the amber CPU warning in the UI is appropriate.
+
+#### Anchor decoding (in `detect.go`)
+
+SCRFD places 2 anchors per feature-map cell. For stride `s` and a 640-pixel input:
+
+```
+feature_map_width = 640 / s
+anchors_per_stride = (640/s)² × 2
+```
+
+Given a flat anchor index `idx` and `fmW = 640/s`:
+
+```go
+row    := idx / (fmW * 2)
+col    := (idx % (fmW * 2)) / 2
+anchor := idx % 2
+
+cx := float32(col*s + s/2 + anchor*s/2)
+cy := float32(row*s + s/2)
+
+// Bbox offsets are scaled by stride:
+x1 := cx - bbox[idx*4+0] * float32(s)
+y1 := cy - bbox[idx*4+1] * float32(s)
+x2 := cx + bbox[idx*4+2] * float32(s)
+y2 := cy + bbox[idx*4+3] * float32(s)
+```
+
+Apply greedy NMS (IoU threshold 0.4) after collecting all stride detections.
 
 ### `internal/api/people.go` (new)
 

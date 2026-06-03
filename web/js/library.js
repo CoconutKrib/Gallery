@@ -276,6 +276,17 @@ window.librarySelectPhoto = function(copyID) {
         <span id="lib-save-status" class="form-status"></span>
       </div>
     </form>
+    <div class="edit-panel-people">
+      <h4>People in this photo</h4>
+      <div class="face-tags" id="faces-list-${copyID}"><span class="no-faces-msg">Loading…</span></div>
+      <div class="face-add-row">
+        <input type="text" id="face-add-input-${copyID}" list="people-datalist-${copyID}"
+               placeholder="Person name…" class="form-input form-input--sm">
+        <button type="button" class="btn btn--sm"
+                onclick="libraryAddFace(${copyID})">Tag</button>
+      </div>
+      <datalist id="people-datalist-${copyID}"></datalist>
+    </div>
     <hr class="edit-panel-divider">
     <div class="edit-panel-danger">
       <button class="btn btn--danger" onclick="libraryConfirmRemove(${copyID}, '${Gallery.utils.esc(photo.relative_path.split('/').pop())}')">
@@ -283,6 +294,9 @@ window.librarySelectPhoto = function(copyID) {
       </button>
       <p class="danger-hint">Deletes the copy and all Gallery records. Original file is not affected.</p>
     </div>`;
+
+  // Load faces asynchronously (panel is already visible).
+  libraryLoadFaces(copyID);
 };
 
 window.libraryClosePanel = function() {
@@ -347,6 +361,88 @@ window.libraryRemovePhoto = async function(copyID) {
     await loadLibraryTree();
   } catch (e) {
     alert('Remove failed: ' + e.message);
+  }
+};
+
+// ---- People / face-tagging panel helpers ----
+
+// Load (or reload) the face tags for the currently open copy.
+window.libraryLoadFaces = async function(copyID) {
+  const facesEl  = document.getElementById('faces-list-' + copyID);
+  const datalist = document.getElementById('people-datalist-' + copyID);
+  if (!facesEl) return;
+
+  try {
+    const [faces, people] = await Promise.all([
+      Gallery.utils.api('/api/library/copies/' + copyID + '/faces'),
+      Gallery.utils.api('/api/people'),
+    ]);
+
+    // Populate datalist for autocomplete.
+    if (datalist) {
+      datalist.innerHTML = people.map(p =>
+        `<option value="${Gallery.utils.esc(p.name)}">`
+      ).join('');
+    }
+
+    // Cache people list for use in libraryAddFace.
+    window._facePeopleCache = people;
+
+    if (!faces.length) {
+      facesEl.innerHTML = '<span class="no-faces-msg">None tagged yet.</span>';
+    } else {
+      facesEl.innerHTML = faces.map(f => `
+        <div class="face-tag" data-face-id="${f.id}">
+          <span class="face-tag-name">${Gallery.utils.esc(f.person_name || '(unidentified)')}</span>
+          <button class="face-tag-remove"
+                  onclick="libraryRemoveFace(${f.id}, ${copyID})" title="Remove">✕</button>
+        </div>`).join('');
+    }
+  } catch (e) {
+    if (facesEl) facesEl.innerHTML = `<span class="no-faces-msg">Error: ${Gallery.utils.esc(e.message)}</span>`;
+  }
+};
+
+// Tag a person in the currently open copy.
+// If the typed name doesn't match an existing person, creates them first.
+window.libraryAddFace = async function(copyID) {
+  const input = document.getElementById('face-add-input-' + copyID);
+  if (!input) return;
+  const name = input.value.trim();
+  if (!name) return;
+
+  const people = window._facePeopleCache || [];
+  let person = people.find(p => p.name.toLowerCase() === name.toLowerCase());
+
+  try {
+    if (!person) {
+      person = await Gallery.utils.api('/api/people', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+    }
+
+    await Gallery.utils.api('/api/library/copies/' + copyID + '/faces', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ person_id: person.id }),
+    });
+
+    input.value = '';
+    await libraryLoadFaces(copyID);
+  } catch (e) {
+    alert('Error tagging person: ' + e.message);
+  }
+};
+
+// Remove a face tag from a copy.
+window.libraryRemoveFace = async function(faceID, copyID) {
+  try {
+    await Gallery.utils.api('/api/faces/' + faceID, { method: 'DELETE' });
+    await libraryLoadFaces(copyID);
+  } catch (e) {
+    alert('Error removing tag: ' + e.message);
   }
 };
 

@@ -15,6 +15,7 @@ Gallery.router = (() => {
     { pattern: /^\/dedup$/, page: 'dedup' },
     { pattern: /^\/staging$/, page: 'staging' },
     { pattern: /^\/library$/, page: 'library' },
+    { pattern: /^\/people(?:\/(\d+))?$/, page: 'people' },
     { pattern: /^\/settings$/, page: 'settings' },
     { pattern: /^\/$/, page: 'home' },
   ];
@@ -61,6 +62,12 @@ Gallery.router = (() => {
     } catch (e) {
       Gallery.settings = {};
     }
+    // Fetch recognition status (non-blocking; used by people.js and library.js).
+    Gallery.utils.api('/api/recognition/status').then(status => {
+      Gallery.recognitionStatus = status;
+    }).catch(() => {
+      Gallery.recognitionStatus = { enabled: false, available: false };
+    });
     dispatch(location.href);
   });
 

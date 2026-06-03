@@ -47,5 +47,15 @@
   "dropzone": {
     "path": "",
     "enabled": false
+  },
+  "face_recognition": {
+    "enabled": false,
+    "onnxruntime_lib": "",
+    "model_dir": "",
+    "detection_model": "",
+    "recognition_model": "",
+    "detection_threshold": 0,
+    "recognition_threshold": 0,
+    "cluster_min_samples": 0
   }
 }

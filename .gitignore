@@ -1,6 +1,10 @@
 #samples
 samples/
 
+#supporting libs
+onnx/
+insightface/
+
 #logs
 gallery.log
 

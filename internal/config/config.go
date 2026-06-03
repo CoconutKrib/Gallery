@@ -41,6 +41,21 @@ type DropzoneConfig struct {
 	Enabled bool   `json:"enabled"`
 }
 
+// FaceRecognitionConfig controls the optional ONNX-based face-detection and
+// recognition pipeline (Phase B/C). When Enabled is false (or the runtime
+// library cannot be loaded) the app still serves all people/face tagging APIs
+// but recognition-only endpoints return 503.
+type FaceRecognitionConfig struct {
+	Enabled              bool    `json:"enabled"`
+	OnnxruntimeLib       string  `json:"onnxruntime_lib"`       // path to libonnxruntime.so
+	ModelDir             string  `json:"model_dir"`             // directory containing ONNX model files
+	DetectionModel       string  `json:"detection_model"`       // filename within model_dir (e.g. det_10g.onnx)
+	RecognitionModel     string  `json:"recognition_model"`     // filename within model_dir (e.g. w600k_r50.onnx)
+	DetectionThreshold   float64 `json:"detection_threshold"`   // 0.0–1.0; default 0.5
+	RecognitionThreshold float64 `json:"recognition_threshold"` // 0.0–1.0; default 0.4
+	ClusterMinSamples    int     `json:"cluster_min_samples"`   // DBSCAN min_samples; default 2
+}
+
 type Config struct {
 	LibraryPaths    []LibraryPath         `json:"library_paths"`
 	CameraWhitelist []CameraEntry         `json:"camera_whitelist"`
@@ -56,6 +71,7 @@ type Config struct {
 	SessionTTLHours int                   `json:"session_ttl_hours"`
 	InternalLibrary InternalLibraryConfig `json:"internal_library"`
 	Dropzone        DropzoneConfig        `json:"dropzone"`
+	FaceRecognition FaceRecognitionConfig `json:"face_recognition"`
 }
 
 func defaults() Config {
@@ -144,6 +160,17 @@ func Validate(cfg *Config) error {
 		}
 		if pathOverlaps(ilAbs, dzAbs) {
 			return fmt.Errorf("internal_library.path %q overlaps dropzone.path %q", ilAbs, dzAbs)
+		}
+	}
+	// Validate face recognition thresholds when provided.
+	if cfg.FaceRecognition.Enabled {
+		dt := cfg.FaceRecognition.DetectionThreshold
+		rt := cfg.FaceRecognition.RecognitionThreshold
+		if dt != 0 && (dt < 0 || dt > 1) {
+			return fmt.Errorf("face_recognition.detection_threshold must be in 0.0–1.0 range")
+		}
+		if rt != 0 && (rt < 0 || rt > 1) {
+			return fmt.Errorf("face_recognition.recognition_threshold must be in 0.0–1.0 range")
 		}
 	}
 	return nil
