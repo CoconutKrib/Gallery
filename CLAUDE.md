@@ -181,6 +181,15 @@ samples/
   - **Phase C (identity clustering + review UI)**: Post-scan suggestion pipeline (per-person mean embedding nearest-neighbour matching) + union-find clustering of unidentified faces; in-memory cluster store; `/api/faces/unidentified`, `/api/faces/suggestions`, `/api/faces/cluster` endpoints; `/faces/review` two-panel UI; recognition status section in Settings.
 - ✅ **Phase 11** — Settings synchronization overhaul: settings page reorganised into editable sections mapped to current `Config` fields (scan paths, whitelist, filename filters, scan/event tuning, logging, auth, face recognition), with section-local save actions using partial `POST /api/settings` payloads.
 - ✅ **Phase 12** — HEIC support: `internal/heif` CGO shim with statically-linked `libheif` + `libde265` (bundled `.a` files in `heif/lib/linux-x64/`). `isSupportedExtension` accepts `.heic`/`.heif`. `decodeImage` routes HEIC for thumbnails and face detection. `ReadEXIF` extracts HEIC EXIF via `heif.ExtractEXIF` → `goexif`. Migration `005_heic.sql` adds `photos.format` column (`'jpeg'`/`'heic'`). `handlePhotoImage` serves JPEG thumbnail for HEIC; `?format=jpeg` on-the-fly transcode; `?original=1` for raw download. `photo.js` auto-appends `?format=jpeg` for HEIC photos. Full test coverage: 8 heif unit tests, 5 transcode API tests, 1 face-detection integration test. HEIC files are on par with JPEGs across all subsystems (foreign keys, tags, people, events, library copy, dedup).
+- ✅ **Phase 13** — Concurrency refactor + async face detection queue: See `spec_concurrency_refactor.md` and `spec_face_recognition.md`.
+  - Face detection moved from SCAN to COPY (only library photos, async via `FaceQueue`).
+  - Persistent ONNX sessions (single SCRFD + ArcFace shared by background worker, server lifetime).
+  - DB version tracking: `photos.recognition_version`, `recognition_status`, `recognition_error`.
+  - Priority queue: 0=manual, 1=copy-time, 2=background catch-up.
+  - `POST /api/photos/{sha256}/detect-faces`, `GET/POST /api/recognition/queue`, `POST /api/recognition/reprocess-all`.
+  - "Detect Faces" button on photo detail + library edit panel; queue status in Settings.
+  - Hash-then-read optimization: `ReadFileAndHash` reads once for both hash and thumbnail.
+  - `Scanner.dbMu` serialises DB writes between walk and thumbnail workers.
 
 ## Known issues / backlog (from TODO.md)
 
