@@ -218,7 +218,6 @@ func (sm *ScanManager) runDropzoneScan() {
 		} else {
 			slog.Info("cluster: done")
 		}
-		runRecognitionPostScan(sm.database, sm.cfg)
 	}
 }
 
@@ -275,9 +274,6 @@ func (sm *ScanManager) runScans(paths []config.LibraryPath) {
 	} else {
 		slog.Info("cluster: done")
 	}
-
-	// Face recognition post-scan: suggest identities + cluster unidentified faces.
-	runRecognitionPostScan(sm.database, sm.cfg)
 }
 
 // runRecognitionPostScan runs the suggestion and clustering pipelines after a

@@ -8,12 +8,14 @@
 package recognition
 
 import (
+	"database/sql"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 
 	"github.com/halleck/gallery/internal/config"
+	"github.com/halleck/gallery/internal/db"
 	ort "github.com/yalue/onnxruntime_go"
 )
 
@@ -36,12 +38,19 @@ var (
 	clusterMu    sync.RWMutex
 	clusterStore []FaceCluster
 	faceCluster  map[int64]int // faceID → clusterID
+
+	// faceQueue is the background face detection worker. Created in Init(),
+	// shut down in Cleanup(). Nil when recognition is unavailable.
+	faceQueue *FaceQueue
+	faceDB    *sql.DB // stored so EnqueueFaceDetection can mark pending in DB
 )
 
 // Init loads the ONNX runtime and model files according to cfg.
 // It must be called once at server startup before scan workers begin.
 // If cfg.Enabled is false, Init is a no-op that returns a disabled status.
-func Init(cfg config.FaceRecognitionConfig) Status {
+// The database handle is stored so the background face-detection worker can
+// update recognition status columns.
+func Init(cfg config.FaceRecognitionConfig, database *sql.DB) Status {
 	if !cfg.Enabled {
 		s := Status{
 			Enabled:   false,
@@ -152,6 +161,10 @@ func Init(cfg config.FaceRecognitionConfig) Status {
 	det = detector
 	emb = embedder
 	initialised = true
+	if database != nil {
+		faceDB = database
+		faceQueue = NewFaceQueue(database)
+	}
 	mu.Unlock()
 
 	return s
@@ -227,10 +240,52 @@ func Cleanup() {
 	if !initialised {
 		return
 	}
+	if faceQueue != nil {
+		faceQueue.Shutdown()
+		faceQueue = nil
+	}
+	if det != nil {
+		_ = det.Close()
+	}
+	if emb != nil {
+		_ = emb.Close()
+	}
 	if err := ort.DestroyEnvironment(); err != nil {
 		slog.Warn("recognition: destroy environment error", "err", err)
 	}
 	initialised = false
+}
+
+// EnqueueFaceDetection adds a photo to the background face detection queue.
+// priority: 0=manual (highest), 1=copy-time, 2=background catch-up.
+// Returns false if recognition is not available or the photo is already queued/done.
+func EnqueueFaceDetection(photoID int64, priority int) bool {
+	mu.RLock()
+	q := faceQueue
+	fdb := faceDB
+	mu.RUnlock()
+	if q == nil || fdb == nil {
+		return false
+	}
+	// Mark pending in DB first (idempotent).
+	if _, err := db.SetPhotoRecognitionPending(fdb, photoID); err != nil {
+		slog.Warn("recognition: set pending before enqueue", "photo_id", photoID, "err", err)
+		return false
+	}
+	return q.Enqueue(photoID, priority)
+}
+
+// QueueStatus returns the current face detection queue state.
+// Returns total queued (ever), total done, total errors, and the photo ID
+// currently being processed (nil if idle).
+func QueueStatus() (totalQueued, totalDone, totalErrors int, processingNow *int64) {
+	mu.RLock()
+	q := faceQueue
+	mu.RUnlock()
+	if q == nil {
+		return 0, 0, 0, nil
+	}
+	return q.Status()
 }
 
 // detectExecutionProvider attempts to use CUDA; falls back to CPU.

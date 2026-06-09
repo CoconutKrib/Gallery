@@ -191,7 +191,7 @@ func maybeInitRecognition(repoRoot string) (recognition.Status, func()) {
 		return recognition.Status{Enabled: false, Available: false, Reason: "test assets missing; recognition init skipped"}, nil
 	}
 
-	status := recognition.Init(cfg)
+	status := recognition.Init(cfg, nil)
 	if !status.Available {
 		return status, nil
 	}

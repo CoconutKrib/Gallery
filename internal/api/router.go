@@ -54,6 +54,7 @@ func (h *Handlers) RegisterRoutes(mux *http.ServeMux, staticFS http.FileSystem) 
 	api("GET", "/api/photos/{sha256}", h.handlePhotoDetail)
 	api("GET", "/api/photos/{sha256}/image", h.handlePhotoImage)
 	api("GET", "/api/photos/{sha256}/thumbnail", h.handlePhotoThumbnail)
+	api("POST", "/api/photos/{sha256}/detect-faces", h.handleDetectFaces)
 	api("GET", "/api/browse/{library_id}", h.handleBrowse)
 	api("GET", "/api/browse/{library_id}/{path...}", h.handleBrowse)
 	api("GET", "/api/scan/status", h.scanner.handleStatus)
@@ -102,6 +103,8 @@ func (h *Handlers) RegisterRoutes(mux *http.ServeMux, staticFS http.FileSystem) 
 
 	// Recognition status (always available).
 	api("GET", "/api/recognition/status", h.handleRecognitionStatus)
+	api("GET", "/api/recognition/queue", h.handleRecognitionQueue)
+	api("POST", "/api/recognition/reprocess-all", h.handleReprocessAll)
 
 	// Recognition pipeline — Phase B/C (gated on recognition available).
 	api("GET", "/api/faces/unidentified", h.handleUnidentifiedFaces)

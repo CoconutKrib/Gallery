@@ -58,7 +58,7 @@ func main() {
 
 	// Initialise face recognition runtime (Phase B/C).
 	// If enabled=false or models missing, server starts with recognition unavailable.
-	recogStatus := recognition.Init(cfg.FaceRecognition)
+	recogStatus := recognition.Init(cfg.FaceRecognition, database)
 	defer recognition.Cleanup()
 
 	if *doScan {

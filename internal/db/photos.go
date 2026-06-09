@@ -11,7 +11,8 @@ const photoSelectCols = `id, sha256, filepath, library_path_id, filename,
 	captured_at, latitude, longitude, altitude,
 	camera_make, camera_model, camera_serial, lens_model,
 	iso, aperture, shutter_speed, focal_length, flash,
-	width, height, orientation, thumbnail_path, flags, ingested_at, source, format`
+	width, height, orientation, thumbnail_path, flags, ingested_at, source, format,
+	recognition_version, recognition_status, recognition_error`
 
 // Photo represents a row in the photos table.
 type Photo struct {
@@ -41,6 +42,10 @@ type Photo struct {
 	IngestedAt    time.Time
 	Source        string // 'scan' or 'dropzone'
 	Format        string // 'jpeg' or 'heic'
+	// Face recognition tracking (006_recognition_version.sql).
+	RecognitionVersion *int
+	RecognitionStatus  *string // 'pending', 'done', 'error'
+	RecognitionError   *string
 }
 
 // InsertPhoto inserts a new photo record. Returns the new row ID.
@@ -125,6 +130,7 @@ func scanPhoto(row *sql.Row) (*Photo, error) {
 		&p.CameraMake, &p.CameraModel, &p.CameraSerial, &p.LensModel,
 		&p.ISO, &p.Aperture, &p.ShutterSpeed, &p.FocalLength, &p.Flash,
 		&p.Width, &p.Height, &p.Orientation, &p.ThumbnailPath, &flagsJSON, &p.IngestedAt, &p.Source, &p.Format,
+		&p.RecognitionVersion, &p.RecognitionStatus, &p.RecognitionError,
 	); err != nil {
 		return nil, err
 	}
@@ -141,6 +147,7 @@ func scanPhotoRows(rows *sql.Rows) (*Photo, error) {
 		&p.CameraMake, &p.CameraModel, &p.CameraSerial, &p.LensModel,
 		&p.ISO, &p.Aperture, &p.ShutterSpeed, &p.FocalLength, &p.Flash,
 		&p.Width, &p.Height, &p.Orientation, &p.ThumbnailPath, &flagsJSON, &p.IngestedAt, &p.Source, &p.Format,
+		&p.RecognitionVersion, &p.RecognitionStatus, &p.RecognitionError,
 	); err != nil {
 		return nil, err
 	}
@@ -156,4 +163,98 @@ func normalizeFlags(p *Photo, flagsJSON string) {
 	if err := json.Unmarshal([]byte(flagsJSON), &p.Flags); err != nil || p.Flags == nil {
 		p.Flags = []string{}
 	}
+}
+
+// CurrentRecognitionVersion is bumped when face detection models change,
+// invalidating previously computed embeddings.
+const CurrentRecognitionVersion = 1
+
+// SetPhotoRecognitionPending marks a photo as pending recognition (e.g. queued
+// for the face worker). Idempotent — if already 'done' at the current version
+// or already 'pending', it's skipped.
+func SetPhotoRecognitionPending(db *sql.DB, photoID int64) (bool, error) {
+	// Only set pending if: no version yet, or version is stale, or previously errored.
+	// Don't overwrite an in-progress 'pending' or a current 'done'.
+	res, err := db.Exec(`
+		UPDATE photos SET recognition_status = 'pending', recognition_error = NULL
+		WHERE id = ?
+		AND (recognition_version IS NULL
+		     OR recognition_version < ?
+		     OR recognition_status = 'error')
+		AND (recognition_status IS NULL OR recognition_status != 'pending')
+	`, photoID, CurrentRecognitionVersion)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// SetPhotoRecognitionDone marks a photo as having completed recognition at the
+// current version.
+func SetPhotoRecognitionDone(db *sql.DB, photoID int64) error {
+	_, err := db.Exec(`
+		UPDATE photos SET recognition_status = 'done', recognition_version = ?, recognition_error = NULL
+		WHERE id = ?
+	`, CurrentRecognitionVersion, photoID)
+	return err
+}
+
+// SetPhotoRecognitionError marks a photo as having failed recognition.
+func SetPhotoRecognitionError(db *sql.DB, photoID int64, errMsg string) error {
+	_, err := db.Exec(`
+		UPDATE photos SET recognition_status = 'error', recognition_error = ?
+		WHERE id = ?
+	`, errMsg, photoID)
+	return err
+}
+
+// ListPhotosNeedingRecognition returns photo IDs that need face detection:
+// those with NULL recognition_version, stale version, error status, or lingering
+// 'pending' from a previous run (e.g. server restart). Ordered by captured_at
+// so older photos are processed first. Limited to the given batch size.
+func ListPhotosNeedingRecognition(db *sql.DB, limit int) ([]int64, error) {
+	rows, err := db.Query(`
+		SELECT id FROM photos
+		WHERE recognition_version IS NULL
+		   OR recognition_version < ?
+		   OR recognition_status = 'error'
+		   OR recognition_status = 'pending'
+		ORDER BY captured_at ASC
+		LIMIT ?
+	`, CurrentRecognitionVersion, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// CountPhotosNeedingRecognition returns the total count of photos that need
+// face detection.
+func CountPhotosNeedingRecognition(db *sql.DB) (int, error) {
+	var count int
+	err := db.QueryRow(`
+		SELECT COUNT(*) FROM photos
+		WHERE recognition_version IS NULL
+		   OR recognition_version < ?
+		   OR recognition_status = 'error'
+		   OR recognition_status = 'pending'
+	`, CurrentRecognitionVersion).Scan(&count)
+	return count, err
+}
+
+// GetPhotoFilepath returns the filepath for a photo by ID, used by the face worker.
+func GetPhotoFilepath(db *sql.DB, photoID int64) (string, error) {
+	var fp string
+	err := db.QueryRow(`SELECT filepath FROM photos WHERE id = ?`, photoID).Scan(&fp)
+	return fp, err
 }

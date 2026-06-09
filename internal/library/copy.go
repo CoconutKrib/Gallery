@@ -15,6 +15,7 @@ import (
 	"unicode"
 
 	"github.com/halleck/gallery/internal/db"
+	"github.com/halleck/gallery/internal/recognition"
 )
 
 // CopyPhoto copies an approved staging entry's photo into the internal library.
@@ -79,7 +80,16 @@ func CopyPhoto(database *sql.DB, entry *db.StagingEntry, photo *db.Photo, librar
 		OverrideDate:    storedOverrideDate,
 		EventID:         entry.EventID,
 	})
-	return relPath, err
+	if err != nil {
+		return relPath, err
+	}
+
+	// Enqueue face detection on the newly copied library photo (async, priority 1 = copy-time).
+	if recognition.IsAvailable() {
+		recognition.EnqueueFaceDetection(photo.ID, 1)
+	}
+
+	return relPath, nil
 }
 
 // BuildRelDir is the exported form of buildRelDir: constructs the directory

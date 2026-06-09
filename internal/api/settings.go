@@ -6,6 +6,8 @@ import (
 
 	"github.com/halleck/gallery/internal/auth"
 	"github.com/halleck/gallery/internal/config"
+	"github.com/halleck/gallery/internal/db"
+	"github.com/halleck/gallery/internal/recognition"
 )
 
 func (h *Handlers) handleGetSettings(w http.ResponseWriter, r *http.Request) {
@@ -237,10 +239,71 @@ func (h *Handlers) handleRecognitionStatus(w http.ResponseWriter, r *http.Reques
 	if s.Reason != "" {
 		reason = s.Reason
 	}
+
+	// Include queue stats when available.
+	queued, done, errors, processingNow := recognition.QueueStatus()
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled":            s.Enabled,
 		"available":          s.Available,
 		"execution_provider": ep,
 		"reason":             reason,
+		"queue_queued":       queued,
+		"queue_done":         done,
+		"queue_errors":       errors,
+		"queue_processing":   processingNow,
+	})
+}
+
+// GET /api/recognition/queue
+// Returns the current face detection queue state.
+func (h *Handlers) handleRecognitionQueue(w http.ResponseWriter, r *http.Request) {
+	queued, done, errors, processingNow := recognition.QueueStatus()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total_queued":   queued,
+		"total_done":     done,
+		"total_errors":   errors,
+		"processing_now": processingNow,
+	})
+}
+
+// POST /api/recognition/reprocess-all
+// Enqueues all photos that need face detection (stale version, errored, or never
+// attempted) in captured_at order. Returns the count queued.
+func (h *Handlers) handleReprocessAll(w http.ResponseWriter, r *http.Request) {
+	if !h.stagingEnabled(w) {
+		return
+	}
+	if !h.recognitionCheck(w) {
+		return
+	}
+
+	// Count total eligible for reporting.
+	total, err := db.CountPhotosNeedingRecognition(h.db)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	// Enqueue in batches to avoid a huge in-memory queue. Each batch of 500
+	// is processed by the worker; as it drains we could enqueue more. For now,
+	// enqueue the first 1000 at background priority.
+	ids, err := db.ListPhotosNeedingRecognition(h.db, 1000)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	queued := 0
+	for _, id := range ids {
+		if recognition.EnqueueFaceDetection(id, 2) {
+			queued++
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total_eligible": total,
+		"queued":         queued,
+		"note":           "Photos are processed in captured_at order. Re-run this endpoint to enqueue the next batch.",
 	})
 }

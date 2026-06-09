@@ -1,4 +1,4 @@
-package heif
+package heif_test
 
 import (
 	"image"
@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/halleck/gallery/internal/config"
+	"github.com/halleck/gallery/internal/heif"
 	"github.com/halleck/gallery/internal/recognition"
 )
 
@@ -39,7 +40,7 @@ func TestDecodeHEICForFaceDetection(t *testing.T) {
 	}
 	defer f.Close()
 
-	img, err := Decode(f)
+	img, err := heif.Decode(f)
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
@@ -129,7 +130,7 @@ func initRecognitionForTest(t *testing.T) {
 		ClusterMinSamples:    2,
 	}
 
-	status := recognition.Init(cfg)
+	status := recognition.Init(cfg, nil)
 	if !status.Available {
 		t.Skipf("recognition init failed: %s", status.Reason)
 	}

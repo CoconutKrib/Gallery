@@ -91,6 +91,16 @@ Gallery.pages.photo = async function(sha256) {
     </div>`;
   }
 
+  // Face detection trigger.
+  const detectFacesHtml = `<div class="meta-card" style="margin-bottom:var(--gap)">
+    <h3>Face Detection</h3>
+    <button class="btn btn--sm" id="detect-faces-btn"
+            onclick="Gallery.pages.photoDetectFaces('${e(sha256)}')">
+      Detect Faces
+    </button>
+    <span id="detect-faces-status" style="margin-left:8px;font-size:12px;color:var(--muted)"></span>
+  </div>`;
+
   app.innerHTML = `<div class="photo-detail">
     ${back}
     ${img}
@@ -106,6 +116,7 @@ Gallery.pages.photo = async function(sha256) {
           <table class="exif-table"><tbody>${fileRows}</tbody></table>
         </div>
         ${eventHtml}
+        ${detectFacesHtml}
         <div class="meta-card">
           <h3>Duplicate locations</h3>
           ${dupesHtml}
@@ -113,4 +124,25 @@ Gallery.pages.photo = async function(sha256) {
       </div>
     </div>
   </div>`;
+};
+
+// Trigger face detection for a photo (async, enqueues to background worker).
+Gallery.pages.photoDetectFaces = async function(sha256) {
+  const btn = document.getElementById('detect-faces-btn');
+  const status = document.getElementById('detect-faces-status');
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = 'Enqueuing…';
+  try {
+    const resp = await Gallery.utils.api('/api/photos/' + sha256 + '/detect-faces', {
+      method: 'POST',
+    });
+    if (resp.queued) {
+      if (status) status.textContent = 'Queued for processing.';
+    } else {
+      if (status) status.textContent = resp.reason || 'Already processed.';
+    }
+  } catch (e) {
+    if (status) status.textContent = 'Error: ' + e.message;
+    if (btn) btn.disabled = false;
+  }
 };

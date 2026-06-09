@@ -10,11 +10,9 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/halleck/gallery/internal/config"
 	gdb "github.com/halleck/gallery/internal/db"
-	"github.com/halleck/gallery/internal/recognition"
 )
 
 // Stats tracks counters for a single scan run.
@@ -42,6 +40,7 @@ const (
 type Scanner struct {
 	cfg           *config.Config
 	db            *sql.DB
+	dbMu          sync.Mutex // serializes DB writes between walk and thumbnail workers
 	libraryPathID int64
 	whitelist     []WhitelistEntry
 	includeRe     []*regexp.Regexp
@@ -126,12 +125,11 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 					slog.Warn("thumbnail error", "path", job.SourcePath, "err", err)
 					continue
 				}
-				if updateErr := gdb.UpdateThumbnailPath(s.db, job.SHA256, path); updateErr != nil {
+				s.dbMu.Lock()
+				updateErr := gdb.UpdateThumbnailPath(s.db, job.SHA256, path)
+				s.dbMu.Unlock()
+				if updateErr != nil {
 					slog.Warn("thumbnail db update error", "sha256", job.SHA256, "err", updateErr)
-				}
-				// Phase B: run face detection + embedding when available.
-				if recognition.IsAvailable() && job.PhotoID != 0 {
-					s.detectAndStoreFaces(job.SourcePath, job.PhotoID)
 				}
 			}
 		}()
@@ -227,7 +225,9 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 
 			// Different path, same hash — it's a duplicate location.
 			// Attempt to record it (idempotent: INSERT OR IGNORE handles rescans).
+			s.dbMu.Lock()
 			isNewDupe, insertErr := recordDuplicateIfNew(s.db, hash, path, s.libraryPathID)
+			s.dbMu.Unlock()
 			if insertErr != nil {
 				slog.Warn("scan duplicate record error", "path", path, "err", insertErr)
 			}
@@ -243,7 +243,9 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 
 		// New photo — ingest.
 		photo := buildPhotoRecord(exifData, hash, path, d.Name(), s.libraryPathID, s.source)
+		s.dbMu.Lock()
 		photoID, insertErr := gdb.InsertPhoto(s.db, photo)
+		s.dbMu.Unlock()
 		if insertErr != nil {
 			slog.Error("scan insert error", "path", path, "err", insertErr)
 			stats.Errors++
@@ -328,98 +330,6 @@ func detectFormat(name string) string {
 		return "heic"
 	}
 	return "jpeg"
-}
-
-// detectAndStoreFaces runs SCRFD detection and ArcFace embedding on the image
-// at sourcePath, then persists the detected faces in the database.
-// It is called from thumbnail worker goroutines and is safe for concurrent use
-// because each call creates its own ONNX sessions.
-// Idempotent: if auto faces already exist for photoID, does nothing.
-func (s *Scanner) detectAndStoreFaces(sourcePath string, photoID int64) {
-	has, err := gdb.HasAutoFacesForPhoto(s.db, photoID)
-	if err != nil {
-		slog.Warn("face detect: db check failed", "photo_id", photoID, "err", err)
-		return
-	}
-	if has {
-		return
-	}
-
-	f, err := os.Open(sourcePath)
-	if err != nil {
-		slog.Warn("face detect: open image failed", "path", sourcePath, "err", err)
-		return
-	}
-	defer f.Close()
-	img, err := decodeImage(sourcePath)
-	if err != nil {
-		slog.Warn("face detect: decode image failed", "path", sourcePath, "err", err)
-		return
-	}
-
-	detector := recognition.GetDetector()
-	if detector == nil {
-		return
-	}
-
-	dets, err := detector.Detect(img)
-	if err != nil {
-		slog.Warn("face detect: detection failed", "path", sourcePath, "err", err)
-		return
-	}
-
-	if len(dets) == 0 {
-		slog.Debug("face detect: no faces found", "path", sourcePath)
-		return
-	}
-
-	slog.Info("face detect: found faces", "path", sourcePath, "count", len(dets))
-
-	origW := img.Bounds().Dx()
-	origH := img.Bounds().Dy()
-	embedder := recognition.GetEmbedder()
-
-	for _, det := range dets {
-		bboxX := float64(det.X1) / float64(recognition.DetInputW)
-		bboxY := float64(det.Y1) / float64(recognition.DetInputH)
-		bboxW := float64(det.X2-det.X1) / float64(recognition.DetInputW)
-		bboxH := float64(det.Y2-det.Y1) / float64(recognition.DetInputH)
-		conf := float64(det.Score)
-
-		face := gdb.Face{
-			PhotoID:    photoID,
-			BboxX:      &bboxX,
-			BboxY:      &bboxY,
-			BboxW:      &bboxW,
-			BboxH:      &bboxH,
-			Source:     "auto",
-			Confidence: &conf,
-			Verified:   false,
-		}
-
-		if embedder != nil {
-			emb, embErr := embedder.Embed(img, det, origW, origH)
-			if embErr != nil {
-				slog.Warn("face detect: embedding failed", "path", sourcePath, "err", embErr)
-			} else {
-				face.Embedding = recognition.EmbeddingToBytes(emb)
-			}
-		}
-
-		if _, insertErr := gdb.InsertFace(s.db, face); insertErr != nil {
-			// SQLITE_BUSY can occur when thumbnail workers and the walk
-			// goroutine both write concurrently. Retry once after a short
-			// backoff — the other writer will have released the lock.
-			if strings.Contains(insertErr.Error(), "database is locked") {
-				time.Sleep(50 * time.Millisecond)
-				if _, retryErr := gdb.InsertFace(s.db, face); retryErr != nil {
-					slog.Warn("face detect: insert face failed (retry)", "photo_id", photoID, "err", retryErr)
-				}
-			} else {
-				slog.Warn("face detect: insert face failed", "photo_id", photoID, "err", insertErr)
-			}
-		}
-	}
 }
 
 // isInternalLibraryPath returns true if path equals or is a subdirectory of the

@@ -1,12 +1,12 @@
-# Scan Pipeline Concurrency Review
+# Scan Pipeline Concurrency Refactor
 
-## Status: Analysis complete, refactoring proposed
+## Status: Implemented ✅
 
 ---
 
-## 1. Current architecture
+## 1. Problem analysis (pre-refactor state)
 
-### 1.0 Photo pipeline stages and where face detection fires
+### 1.0 Photo pipeline stages and where face detection fired
 
 The app has a three-stage pipeline:
 
@@ -163,12 +163,11 @@ A dedicated face-detection worker pool would be cleaner.
 
 ---
 
-## 3. Proposed refactoring
+## 3. Implemented architecture
 
 ### 3.1 Design principle: defer expensive work to library copy
 
-The scan pipeline has three kinds of work, with very different cost profiles
-and different appropriate stages:
+The scan pipeline has three kinds of work, with very different cost profiles:
 
 | Work | Cost | Should run at | Why |
 |------|------|--------------|-----|
@@ -176,290 +175,240 @@ and different appropriate stages:
 | File copy | Low (I/O) | **COPY** | Only for approved photos |
 | Face detection + embedding | High (GPU + DB) | **COPY** | Only library photos need face data |
 
-**Current problem**: face detection runs at SCAN time on all discovered photos.
-A large source directory with thousands of photos will run face detection on
-every one, even if the user only keeps 10%. This wastes GPU time, DB writes
-(one `faces` row per detected face), and DB storage (512-dim embeddings).
+Face detection was moved from SCAN to COPY. When a photo is approved and
+copied into the library, it is enqueued for async face detection in a
+background worker (`recognition.FaceQueue`). The `runRecognitionPostScan`
+(suggestions + clustering) fires after bulk copy completes.
 
-**Proposed change**: move face detection from SCAN to COPY. When a photo is
-approved and copied into the library (`library.CopyPhoto`), trigger face
-detection on the library copy. This ensures face data only exists for photos
-the user has chosen to keep.
-
-The `runRecognitionPostScan` (suggestions + clustering) would also move to
-after the bulk copy completes, rather than after scan.
-
-### 3.2 Design principle: separate I/O work from GPU work
-
-The scan pipeline has two very different kinds of work:
+### 3.2 Design principle: separate I/O from GPU work
 
 | Type | Examples | Best parallelism model |
 |------|----------|----------------------|
 | **I/O + CPU** | File read, SHA-256, EXIF parse, JPEG resize | Pool of N workers, one per CPU core |
 | **GPU inference** | SCRFD detection, ArcFace embedding | **Single worker, sequential queue** — keeps GPU hot, avoids session duplication |
 
-The current design conflates these: thumbnail workers do both I/O-bound work
-(resize, file write) and GPU inference (detection, embedding) in the same
-goroutine. This forces every worker to hold its own ONNX sessions.
+Thumbnail workers no longer do face detection. A dedicated background goroutine
+(`FaceQueue` worker) owns the persistent ONNX sessions for the server's lifetime.
 
-### 3.2 Recommended architecture: thumbnail pool + dedicated face worker
+### 3.3 Architecture diagram (as built)
 
 ```
                          ┌──────────────────┐
-  WalkDir ──────────────→│  fileJob channel │
-  (1 goroutine, fast)    └────────┬─────────┘
+  WalkDir ──────────────→│  thumbJobs chan  │
+  (1 goroutine)          └────────┬─────────┘
                                   │
                ┌──────────────────┼──────────────────┐
                ▼                  ▼                  ▼
         ┌────────────┐    ┌────────────┐    ┌────────────┐
         │ worker 1   │    │ worker 2   │... │ worker M   │  (M = ScanWorkers)
-        │ EXIF       │    │ EXIF       │    │ EXIF       │
-        │ Hash       │    │ Hash       │    │ Hash       │
         │ Thumbnail  │    │ Thumbnail  │    │ Thumbnail  │
-        │            │    │            │    │            │
-        │── faceJob ─│──  │── faceJob ─│──  │── faceJob ─│──
+        │ DB update  │    │ DB update  │    │ DB update  │
         └────────────┘    └────────────┘    └────────────┘
-               │                  │                  │
-               └──────────────────┼──────────────────┘
+        ↑ dbMu serialises DB writes between walk + workers
+
+  ─ ─ ─ ─ ─ SCAN / COPY boundary ─ ─ ─ ─ ─
+
+  CopyPhoto ────────────→ recognition.EnqueueFaceDetection(photoID, priority=1)
+  Manual trigger ──────→ recognition.EnqueueFaceDetection(photoID, priority=0)
+  Reprocess-all ───────→ recognition.EnqueueFaceDetection(photoID, priority=2)
+
                                   ▼
-                         ┌──────────────────┐
-                         │  faceJob channel │
-                         └────────┬─────────┘
-                                  │
-                                  ▼
-                         ┌──────────────────────────┐
-                         │  Face worker (1 goroutine)│
-                         │                           │
-                         │  ← single SCRFD session   │
-                         │  ← single ArcFace session │
-                         │                           │
-                         │  for job := range queue:  │
-                         │    Decode image           │
-                         │    detector.Detect(img)   │
-                         │    embedder.Embed(img)     │
-                         │    DB insert face         │
-                         └──────────────────────────┘
+                         ┌──────────────────────────────┐
+                         │  FaceQueue (priority queue)   │
+                         │  0=manual, 1=copy, 2=batch    │
+                         └────────────┬─────────────────┘
+                                      │
+                                      ▼
+                         ┌──────────────────────────────┐
+                         │  Face worker (1 goroutine)    │
+                         │  runs for server lifetime     │
+                         │                               │
+                         │  ← single SCRFD session       │
+                         │  ← single ArcFace session     │
+                         │                               │
+                         │  for job := range queue:      │
+                         │    SetPhotoRecognitionPending │
+                         │    Decode image (JPEG/HEIC)   │
+                         │    detector.Detect(img)       │
+                         │    embedder.Embed(img, det)   │
+                         │    InsertFace(db)             │
+                         │    SetPhotoRecognitionDone    │
+                         └──────────────────────────────┘
 ```
 
 **Key properties:**
 
-1. **Thumbnail workers** (I/O + CPU) stay parallel — image resize, file write,
-   EXIF, hashing. No ONNX sessions needed here.
+1. **Thumbnail workers** (I/O + CPU) stay parallel — image resize, EXIF, hashing.
+   No ONNX sessions. DB writes serialised via `Scanner.dbMu`.
 
-2. **Face worker** is a single goroutine with a single SCRFD session and a
-   single ArcFace session. The sessions are created once at scan start and
-   destroyed at scan end. Images are processed sequentially from a buffered
-   channel. This keeps the GPU pipeline hot and eliminates session duplication
-   entirely.
+2. **Face worker** is a single goroutine with persistent SCRFD + ArcFace sessions.
+   Sessions are created once at server startup (`recognition.Init`) and destroyed
+   at shutdown (`recognition.Cleanup`). Images are processed sequentially from a
+   priority queue. This keeps the GPU pipeline hot and eliminates session
+   duplication entirely.
 
-3. **DB writes** are serialized either through the face worker (for face inserts)
-   or through a mutex shared with the walk goroutine (for photo inserts +
-   thumbnail path updates).
+3. **Face detection is asynchronous** from the copy operation. `CopyPhoto` returns
+   immediately after enqueuing. The face worker processes jobs in the background.
 
-### 3.3 API changes to `internal/recognition`
+### 3.4 DB version tracking
 
-The `Detector` and `Embedder` types need to hold a persistent session:
+A new migration (`006_recognition_version.sql`) adds three columns to `photos`:
+
+| Column | Type | Purpose |
+|--------|------|---------|
+| `recognition_version` | INTEGER | `NULL`=never attempted. Compared against `CurrentRecognitionVersion`. |
+| `recognition_status` | TEXT | `pending` / `done` / `error`. Updated by the face worker. |
+| `recognition_error` | TEXT | Error message when status is `error`. |
+
+`CurrentRecognitionVersion = 1` is a constant in `db/photos.go`. When face
+detection models are upgraded, bumping this constant invalidates all previous
+results. The "Reprocess All" button in Settings enqueues all photos with stale
+or missing versions.
+
+On server restart, photos with `recognition_status = 'pending'` from a previous
+run are automatically eligible for re-enqueuing via the batch reprocess endpoint.
+
+### 3.5 Priority queue
+
+Three priority levels in `FaceQueue`:
+
+| Priority | Value | Source | Use case |
+|----------|-------|--------|----------|
+| Manual | 0 | UI button click | User wants faces NOW |
+| Copy-time | 1 | `CopyPhoto` | Normal ingest flow |
+| Background | 2 | "Reprocess All" | Catch-up for old/stale photos |
+
+Lower value = higher urgency. The worker always picks the highest-priority job.
+Re-enqueuing a photo at a higher priority bumps it (idempotent).
+
+### 3.6 API changes
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/photos/{sha256}/detect-faces` | Enqueue for face detection (priority 0). Returns `{queued: true/false, reason}`. |
+| `GET` | `/api/recognition/status` | Now includes `queue_queued`, `queue_done`, `queue_errors`, `queue_processing`. |
+| `GET` | `/api/recognition/queue` | Dedicated queue status: `{total_queued, total_done, total_errors, processing_now}`. |
+| `POST` | `/api/recognition/reprocess-all` | Batch-enqueues up to 1000 eligible photos in `captured_at` order (priority 2). Returns `{total_eligible, queued, note}`. Re-runnable for large libraries. |
+
+### 3.7 `internal/recognition` package changes
+
+**`Detector` / `Embedder`** — persistent sessions via `DynamicAdvancedSession`:
 
 ```go
 type Detector struct {
     modelPath   string
     threshold   float32
     sessionOpts *ort.SessionOptions
-    mu          sync.Mutex        // serialize access to the session
-    session     *ort.AdvancedSession
+    mu          sync.Mutex
+    session     *ort.DynamicAdvancedSession
+    opened      bool
 }
 
-func (d *Detector) Detect(img image.Image) ([]Detection, error) {
-    d.mu.Lock()
-    defer d.mu.Unlock()
-    // ... reuse d.session, update input tensor data, call session.Run()
-}
+func (d *Detector) Open() error   // create session once (idempotent)
+func (d *Detector) Close() error  // destroy session (idempotent)
+func (d *Detector) Detect(img)    // lazy-open if needed, reuse session under mutex
 ```
 
-The session is created once via a new `Open()` method and destroyed via `Close()`.
-The mutex ensures only one goroutine uses the session at a time — exactly what
-we want for a single-consumer queue.
+`Embedder` has the same pattern. Sessions are created by the `FaceQueue` worker
+at startup and held for the server's lifetime.
 
-The face worker goroutine would:
+**`FaceQueue`** (`recognition/queue.go` — new file):
 
 ```go
-func (s *Scanner) faceWorker(jobs <-chan *FaceJob) {
-    detector := recognition.GetDetector()
-    embedder := recognition.GetEmbedder()
-    for job := range jobs {
-        img := decodeImage(job.SourcePath)
-        detections, _ := detector.Detect(img)  // mutex-protected, sequential
-        for _, det := range detections {
-            emb, _ := embedder.Embed(img, det, ...)  // mutex-protected, sequential
-            // ... build Face, send to DB writer
-        }
-    }
-}
+type FaceQueue struct { ... }
+func NewFaceQueue(database *sql.DB) *FaceQueue  // starts background worker
+func (q *FaceQueue) Enqueue(photoID int64, priority int) bool
+func (q *FaceQueue) Status() (queued, done, errors int, processing *int64)
+func (q *FaceQueue) Shutdown()
 ```
 
-### 3.4 Benefits
+**`recognition.go`** — manages the FaceQueue singleton:
+
+```go
+func Init(cfg FaceRecognitionConfig, database *sql.DB) Status  // creates FaceQueue if available
+func EnqueueFaceDetection(photoID int64, priority int) bool    // package-level convenience
+func QueueStatus() (queued, done, errors int, processing *int64)
+func Cleanup()  // shuts down FaceQueue, closes sessions, destroys ONNX env
+```
+
+### 3.8 UI changes
+
+| Page | Change |
+|------|--------|
+| Photo detail (`photo.js`) | "Detect Faces" button with status feedback |
+| Library edit panel (`library.js`) | "Auto-Detect Faces" button in the People/face-tagging section |
+| Settings (`settings.js`) | Queue status (queued/done/errors + current processing). "Reprocess All Photos" button with batch-feedback. |
+
+---
+
+## 4. Benefits realised
 
 | Aspect | Before | After |
 |--------|--------|-------|
-| ONNX sessions | N×2 per scan | 2 total (shared) |
+| When faces detected | During SCAN (all discovered photos) | During COPY (only library photos), async |
+| ONNX sessions | N×2 per scan (transient) | 2 total (persistent, server lifetime) |
 | VRAM usage | N × ~50 MB per model | ~50 MB per model (fixed) |
 | GPU throughput | Context-switching between N sessions | Sequential, hot pipeline |
-| DB writes | Contention, retry | Serialized (mutex or dedicated writer) |
-| Code clarity | Face detection embedded in thumbnail worker | Clean separation: thumbnails vs faces |
-
----
-
-## 4. Additional opportunities
-
-### 4.1 Hash-then-read optimization
-
-Currently `HashFile` reads the entire file, then `GenerateThumbnail` (or
-`decodeImage` for face detection) reads it again. With a single file read
-into a `[]byte` buffer, the hash can be computed and the image decoded from
-the same buffer:
-
-```go
-data, _ := os.ReadFile(path)
-hash := sha256.Sum256(data)
-img, _, _ := image.Decode(bytes.NewReader(data))
-```
-
-**Trade-off**: memory for large RAW/TIFF files. For JPEG/HEIC phone photos
-(typically 2–12 MB), this is fine. Can add a size threshold.
-
-### 4.2 Thumbnail caching before DB insert
-
-Thumbnails are written to disk and their path is DB-updated. If the DB insert
-happens first (current order), a race exists where the API could serve a photo
-with no thumbnail yet. Reversing the order (write thumbnail, then DB insert)
-eliminates this.
-
-### 4.3 Face detection batch processing
-
-Rather than running face detection inline in thumbnail workers, batch face
-detection jobs and process them after all thumbnails are done. This lets the
-thumbnail pool finish faster and avoids competing for CPU between image resize
-and ONNX inference.
-
----
-
-## 5. Recommendation
-
-**Move face detection from SCAN to COPY**, and **use a single dedicated face
-worker with persistent ONNX sessions**. This combination:
-
-1. **Eliminates wasted work** — only library photos get face detection
-2. **Eliminates ONNX session duplication** — single SCRFD + ArcFace session
-3. **Eliminates SQLITE_BUSY** — face worker is single-threaded, no DB contention with thumbnail workers
-4. **Keeps thumbnail generation parallel** — CPU-bound image resize still benefits from worker pool
-
-The implementation has two independent axes that can be done separately:
-
-| Axis | What changes | Solves |
-|------|-------------|--------|
-| **Pipeline stage** | Move `detectAndStoreFaces` call from `scanner.go` thumbnail workers to `library/copy.go` CopyPhoto | Wasted GPU/DB on rejected photos |
-| **Concurrency model** | Single face worker goroutine + persistent ONNX sessions + DB write mutex | Session duplication, SQLITE_BUSY |
-
-Both axes are compatible — the face worker can be started during the COPY
-phase (in `handleLibraryCopyAll` or `CopyPhoto`) rather than during SCAN.
-
----
-
-## 6. Implementation plan (step by step)
-
-### Axis A: Move face detection from SCAN to COPY
-
-**File**: `internal/scan/scanner.go`
-
-- Remove the `detectAndStoreFaces` call from the thumbnail worker (line ~134):
-  ```go
-  // REMOVE:
-  if recognition.IsAvailable() && job.PhotoID != 0 {
-      s.detectAndStoreFaces(job.SourcePath, job.PhotoID)
-  }
-  ```
-
-**File**: `internal/library/copy.go`, `CopyPhoto` function
-
-- After the file is copied and `library_copies` record inserted, trigger face
-  detection on the library copy if recognition is available:
-  ```go
-  if recognition.IsAvailable() {
-      s.detectAndStoreFaces(absPath, photo.ID)
-  }
-  ```
-  (The Scanner or a face-detection service needs to be accessible here.
-  Alternatively, queue a face job on a shared channel.)
-
-**File**: `internal/api/library.go`, `runBulkCopy`
-
-- Move `runRecognitionPostScan` call to after bulk copy completes (it
-  currently runs after scan in `internal/api/scan.go`).
-
-**File**: `internal/api/scan.go`, `runScans` and `runDropzoneScan`
-
-- Remove `runRecognitionPostScan` call from the scan completion path.
-
-### Axis B: Single face worker + persistent ONNX sessions
-
-**Files**: `internal/recognition/detect.go`, `internal/recognition/embed.go`
-
-- Add `session *ort.AdvancedSession` and `mu sync.Mutex` to `Detector` struct
-- Add `session *ort.AdvancedSession` and `mu sync.Mutex` to `Embedder` struct
-- Add `Open() error` method that creates the session once
-- Add `Close() error` method that destroys it
-- Change `Detect()` and `Embed()` to lock `mu`, reuse `session`, unlock
-
-**File**: `internal/scan/scanner.go` (or new `internal/scan/face_worker.go`)
-
-- Extract face detection logic into a standalone face worker that can be
-  started from either the scan path or the copy path:
-  ```go
-  func StartFaceWorker(jobs <-chan *FaceJob, db *sql.DB) {
-      detector := recognition.GetDetector()
-      embedder := recognition.GetEmbedder()
-      detector.Open()
-      embedder.Open()
-      defer detector.Close()
-      defer embedder.Close()
-      for job := range jobs {
-          detectAndStoreFaces(job.SourcePath, job.PhotoID, db)
-      }
-  }
-  ```
-
-**File**: `internal/scan/scanner.go`
-
-- Add `dbMu sync.Mutex` to `Scanner` struct for DB write serialization
-- Lock around `InsertPhoto`, `UpdateThumbnailPath`, `recordDuplicateIfNew`
-- Remove the 50ms SQLITE_BUSY retry in `detectAndStoreFaces`
-
-### Files touched
-
-| Step | File | Lines changed |
-|------|------|--------------|
-| A.1 | `internal/scan/scanner.go` | −4 |
-| A.2 | `internal/library/copy.go` | +8 |
-| A.3 | `internal/api/library.go` | +3, −0 |
-| A.4 | `internal/api/scan.go` | −3 |
-| B.1 | `internal/recognition/detect.go` | ~30 |
-| B.2 | `internal/recognition/embed.go` | ~30 |
-| B.3 | `internal/scan/scanner.go` (face worker) | ~20 |
-| B.4 | `internal/scan/scanner.go` (dbMu) | ~15 |
-| **Total** | | **~110** |
-
-### Behavior changes
-
-| Aspect | Before | After |
-|--------|--------|-------|
-| When faces detected | During SCAN (all discovered photos) | During COPY (only library photos) |
-| ONNX sessions | N×2 per scan (transient) | 2 total (persistent, shared) |
-| DB contention | Walk vs thumbnail workers | Walk vs thumbnail workers (face worker is single-threaded) |
+| DB contention (scan) | Walk vs thumbnail workers | Walk vs thumbnail workers (dbMu) |
+| DB contention (faces) | N concurrent InsertFace | Single-threaded via face worker |
 | `runRecognitionPostScan` | After scan | After bulk copy |
 | Rejected photos | Faces stored but never used | No faces stored |
+| Model upgrades | Stuck with old embeddings | Bump `CurrentRecognitionVersion`, click "Reprocess All" |
+| Manual re-detect | Impossible | One click from photo detail or library panel |
+| Queue visibility | None | Settings page shows queue depth + current processing |
 
-Estimated effort: ~150 lines net change in `internal/scan/scanner.go` (add
-faceJob channel + face worker goroutine), ~30 lines in `internal/recognition`
-(add session persistence + mutex to Detector/Embedder). All existing tests
-should pass without modification. New tests for the face worker channel and
-session reuse.
+---
+
+## 5. Files changed
+
+| File | Change |
+|------|--------|
+| `internal/db/migrations/006_recognition_version.sql` | **New** — schema columns |
+| `internal/db/photos.go` | Photo struct + scan helpers + 6 new query functions |
+| `internal/recognition/queue.go` | **New** — `FaceQueue` + `FaceWorker` |
+| `internal/recognition/recognition.go` | `Init(cfg, db)`, `EnqueueFaceDetection`, `QueueStatus`, `Cleanup` extended |
+| `internal/recognition/detect.go` | Persistent `DynamicAdvancedSession`, `Open()`/`Close()`, lazy-open `Detect()` |
+| `internal/recognition/embed.go` | Same persistent session pattern |
+| `internal/scan/scanner.go` | Removed `DetectAndStoreFaces` + `recognition` import; added `dbMu` |
+| `internal/library/copy.go` | `CopyPhoto` enqueues via `recognition.EnqueueFaceDetection` instead of blocking |
+| `internal/api/library.go` | Removed session Open/Close from `runBulkCopy` |
+| `internal/api/scan.go` | Removed `runRecognitionPostScan` calls (moved to bulk copy) |
+| `internal/api/photos.go` | `POST /api/photos/{sha256}/detect-faces` handler |
+| `internal/api/settings.go` | `GET /api/recognition/queue`, `POST /api/recognition/reprocess-all`, extended status |
+| `internal/api/router.go` | New route registrations |
+| `main.go` | Pass `database` to `recognition.Init` |
+| `internal/heif/face_detect_test.go` | Changed to external test package (`heif_test`) to break import cycle |
+| `internal/integration/pipeline_test.go` | Updated `Init` call signature |
+| `web/js/photo.js` | "Detect Faces" button |
+| `web/js/library.js` | "Auto-Detect Faces" button in face-tagging panel |
+| `web/js/settings.js` | Queue status display + "Reprocess All Photos" button |
+
+---
+
+## 6. Additional opportunities (future work)
+
+### 6.1 Hash-then-read optimization
+
+Currently `HashFile` reads the entire file, then `GenerateThumbnail` reads it
+again. With a single `[]byte` buffer the hash can be computed and the image
+decoded from the same read. Trade-off: memory for large files.
+
+### 6.2 Thumbnail caching before DB insert
+
+Reversing the order (write thumbnail, then DB insert) eliminates a race where
+the API could serve a photo with no thumbnail yet.
+
+### 6.3 Multi-library parallel scan
+
+`runScans` iterates library paths sequentially. Multiple paths on different
+physical drives could scan in parallel.
+
+### 6.4 TODO: "Detect all" smart batching
+
+The current "Reprocess All" endpoint enqueues batches of 1000. For very large
+libraries (50k+ photos), a smarter scheduler could process in historic
+`captured_at` order and show progress. The batch size could be configurable.
+
+### 6.5 TODO: Dropzone watch mode
+
+`inotify`/`fsnotify` to trigger scans automatically instead of manual trigger.

@@ -3,6 +3,7 @@ package recognition
 import (
 	"fmt"
 	"image"
+	"sync"
 
 	ort "github.com/yalue/onnxruntime_go"
 )
@@ -31,6 +32,9 @@ type Detector struct {
 	modelPath   string
 	threshold   float32
 	sessionOpts *ort.SessionOptions // nil = CPU default
+	mu          sync.Mutex
+	session     *ort.DynamicAdvancedSession
+	opened      bool
 }
 
 func newDetector(modelPath string, threshold float32, opts *ort.SessionOptions) (*Detector, error) {
@@ -41,9 +45,53 @@ func newDetector(modelPath string, threshold float32, opts *ort.SessionOptions) 
 	return &Detector{modelPath: modelPath, threshold: threshold, sessionOpts: opts}, nil
 }
 
+// Open creates the persistent ONNX session. Idempotent — subsequent calls are no-ops.
+func (d *Detector) Open() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.opened {
+		return nil
+	}
+	session, err := ort.NewDynamicAdvancedSession(d.modelPath,
+		[]string{"input.1"},
+		[]string{"448", "471", "494", "451", "474", "497", "454", "477", "500"},
+		d.sessionOpts,
+	)
+	if err != nil {
+		return fmt.Errorf("opening detection session: %w", err)
+	}
+	d.session = session
+	d.opened = true
+	return nil
+}
+
+// Close destroys the persistent ONNX session. Idempotent.
+func (d *Detector) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.opened {
+		return nil
+	}
+	err := d.session.Destroy()
+	d.session = nil
+	d.opened = false
+	return err
+}
+
 // Detect runs SCRFD face detection on img and returns filtered detections.
 // The returned bounding boxes are in the 640×640 detection input space.
+// Uses a persistent session created by Open(); creates one lazily if not opened.
 func (d *Detector) Detect(img image.Image) ([]Detection, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Lazy-open if needed (for single-shot callers).
+	if !d.opened {
+		if err := d.openLocked(); err != nil {
+			return nil, err
+		}
+	}
+
 	inputData := preprocessBGRFloat32(img, DetInputW, DetInputH)
 
 	inputShape := ort.NewShape(1, 3, DetInputH, DetInputW)
@@ -107,39 +155,35 @@ func (d *Detector) Detect(img image.Image) ([]Detection, error) {
 	}
 	defer kps32.Destroy()
 
-	// Node names for buffalo_l v2+ det_10g.onnx.
-	// Grouped by type then by stride (score, bbox, kps) × (8, 16, 32).
-	inputNames := []string{"input.1"}
-	outputNames := []string{
-		"448", "471", "494", // scores: stride 8, 16, 32
-		"451", "474", "497", // bboxes: stride 8, 16, 32
-		"454", "477", "500", // kps:    stride 8, 16, 32
-	}
+	inputs := []ort.Value{inputTensor}
+	outputs := []ort.Value{score8, score16, score32, bbox8, bbox16, bbox32, kps8, kps16, kps32}
 
-	session, err := ort.NewAdvancedSession(d.modelPath,
-		inputNames, outputNames,
-		[]ort.Value{inputTensor},
-		[]ort.Value{score8, score16, score32, bbox8, bbox16, bbox32, kps8, kps16, kps32},
-		d.sessionOpts,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("creating detection session: %w", err)
-	}
-	defer session.Destroy()
-
-	if err := session.Run(); err != nil {
+	if err := d.session.Run(inputs, outputs); err != nil {
 		return nil, fmt.Errorf("running detection: %w", err)
 	}
 
 	// Decode and NMS.
-	// Scores from det_10g.onnx are already sigmoid-activated (probabilities in
-	// [0,1]). Do NOT apply sigmoid again.
 	var boxes []rawBox
 	boxes = append(boxes, decodeAnchors(score8.GetData(), bbox8.GetData(), kps8.GetData(), 8, DetInputW, d.threshold)...)
 	boxes = append(boxes, decodeAnchors(score16.GetData(), bbox16.GetData(), kps16.GetData(), 16, DetInputW, d.threshold)...)
 	boxes = append(boxes, decodeAnchors(score32.GetData(), bbox32.GetData(), kps32.GetData(), 32, DetInputW, d.threshold)...)
 
 	return nmsDetections(boxes, 0.4), nil
+}
+
+// openLocked creates the persistent session. Caller must hold d.mu.
+func (d *Detector) openLocked() error {
+	session, err := ort.NewDynamicAdvancedSession(d.modelPath,
+		[]string{"input.1"},
+		[]string{"448", "471", "494", "451", "474", "497", "454", "477", "500"},
+		d.sessionOpts,
+	)
+	if err != nil {
+		return fmt.Errorf("opening detection session: %w", err)
+	}
+	d.session = session
+	d.opened = true
+	return nil
 }
 
 // validateDetectionModel creates a minimal session to confirm the model file

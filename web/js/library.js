@@ -285,6 +285,13 @@ window.librarySelectPhoto = function(copyID) {
         <button type="button" class="btn btn--sm"
                 onclick="libraryAddFace(${copyID})">Tag</button>
       </div>
+      <div class="face-add-row" style="margin-top:6px">
+        <button type="button" class="btn btn--sm" id="detect-faces-btn-${copyID}"
+                onclick="libraryDetectFaces(${copyID}, '${Gallery.utils.esc(photo.photo_sha256)}')">
+          Auto-Detect Faces
+        </button>
+        <span id="detect-faces-status-${copyID}" style="margin-left:6px;font-size:12px;color:var(--muted)"></span>
+      </div>
       <datalist id="people-datalist-${copyID}"></datalist>
     </div>
     <hr class="edit-panel-divider">
@@ -489,3 +496,24 @@ window.libraryRemoveFace = async function(faceID, copyID) {
 }
 
 
+
+// Trigger face detection for a library copy (async, enqueues to background worker).
+window.libraryDetectFaces = async function(copyID, sha256) {
+  const btn = document.getElementById('detect-faces-btn-' + copyID);
+  const status = document.getElementById('detect-faces-status-' + copyID);
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = 'Enqueuing…';
+  try {
+    const resp = await Gallery.utils.api('/api/photos/' + sha256 + '/detect-faces', {
+      method: 'POST',
+    });
+    if (resp.queued) {
+      if (status) status.textContent = 'Queued. Faces will appear shortly.';
+    } else {
+      if (status) status.textContent = resp.reason || 'Already processed.';
+    }
+  } catch (e) {
+    if (status) status.textContent = 'Error: ' + e.message;
+    if (btn) btn.disabled = false;
+  }
+};

@@ -16,6 +16,7 @@ import (
 
 	"github.com/halleck/gallery/internal/db"
 	"github.com/halleck/gallery/internal/heif"
+	"github.com/halleck/gallery/internal/recognition"
 )
 
 func (h *Handlers) handlePhotos(w http.ResponseWriter, r *http.Request) {
@@ -981,4 +982,31 @@ func isValidSHA256(s string) bool {
 		}
 	}
 	return true
+}
+
+// POST /api/photos/{sha256}/detect-faces
+// Enqueues the photo for face detection in the background worker (priority 0 = manual).
+func (h *Handlers) handleDetectFaces(w http.ResponseWriter, r *http.Request) {
+	sha256 := r.PathValue("sha256")
+	if !isValidSHA256(sha256) {
+		writeError(w, http.StatusBadRequest, "invalid sha256")
+		return
+	}
+
+	photo, err := db.GetPhotoBySHA256(h.db, sha256)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "photo not found")
+		return
+	}
+
+	if !recognition.IsAvailable() {
+		writeError(w, http.StatusServiceUnavailable, "face recognition not available")
+		return
+	}
+
+	if recognition.EnqueueFaceDetection(photo.ID, 0) {
+		writeJSON(w, http.StatusOK, map[string]any{"queued": true})
+	} else {
+		writeJSON(w, http.StatusOK, map[string]any{"queued": false, "reason": "already queued or done"})
+	}
 }

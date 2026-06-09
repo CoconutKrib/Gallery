@@ -541,9 +541,27 @@ Gallery.settings = {
           details += `<div class="settings-row"><span style="color:var(--warning,#f90);font-size:12px">
             ⚠ Running on CPU — face recognition will be slow for large libraries. Consider installing CUDA for GPU acceleration.</span></div>`;
         }
+
+        // Queue status.
+        const processing = s.queue_processing ? `Processing photo #${s.queue_processing}` : 'Idle';
+        details += `<div class="settings-row"><span class="label">Queue</span>
+          <span class="value">${esc(s.queue_queued || 0)} queued, ${esc(s.queue_done || 0)} done, ${esc(s.queue_errors || 0)} errors</span></div>
+          <div class="settings-row"><span class="label">Worker</span><span class="value">${esc(processing)}</span></div>`;
       }
+
+      // Reprocess button.
+      const reprocessBtn = (s.available) ? `
+        <div class="settings-row" style="margin-top:8px">
+          <button class="scan-btn" id="reprocess-all-btn"
+                  onclick="Gallery.settings.reprocessAll(this)">Reprocess All Photos</button>
+          <span id="reprocess-all-status" class="scan-status"></span>
+        </div>
+        <div class="settings-row" style="font-size:12px;color:var(--muted)">
+          Queues all photos needing face detection in captured_at order. Safe to run multiple times.
+        </div>` : '';
+
       panel.innerHTML = `<div class="settings-row"><span class="label">Status</span>
-        <span class="value">${statusBadge}</span></div>${details}`;
+        <span class="value">${statusBadge}</span></div>${details}${reprocessBtn}`;
     } catch (e) {
       if (panel) panel.innerHTML = `<span style="color:var(--muted)">Unavailable: ${Gallery.utils.esc(e.message)}</span>`;
     }
@@ -672,6 +690,27 @@ Gallery.settings = {
       statusEl.textContent = 'Error: ' + err.message;
     } finally {
       btn.disabled = false;
+    }
+  },
+
+  // ── Reprocess all photos for face detection ─────────────────────────────────
+  async reprocessAll(btn) {
+    btn.disabled = true;
+    const statusEl = document.getElementById('reprocess-all-status');
+    if (statusEl) statusEl.textContent = 'Enqueuing…';
+    try {
+      const resp = await Gallery.utils.api('/api/recognition/reprocess-all', {
+        method: 'POST',
+      });
+      if (statusEl) {
+        statusEl.textContent = `Queued ${resp.queued} of ${resp.total_eligible} eligible photos.`;
+      }
+    } catch (err) {
+      if (statusEl) statusEl.textContent = 'Error: ' + err.message;
+    } finally {
+      btn.disabled = false;
+      // Refresh status after a moment.
+      setTimeout(() => this.loadRecognitionStatus(), 1500);
     }
   },
 

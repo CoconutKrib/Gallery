@@ -91,6 +91,9 @@ func (h *Handlers) runBulkCopy() {
 	if err := cluster.Run(h.db, h.cfg.EventGapDays, h.cfg.EventGeoKm); err != nil {
 		slog.Warn("library: cluster run after copy failed", "err", err)
 	}
+
+	// Face recognition post-copy: suggest identities + cluster unidentified faces.
+	runRecognitionPostScan(h.db, h.cfg)
 }
 
 // POST /api/library/copy/{staging_id} — copy a single approved entry
