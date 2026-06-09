@@ -5,6 +5,9 @@ samples/
 onnx/
 insightface/
 
+# HEIC build artifacts (static .a libs and headers are committed)
+heif/_build/
+
 #logs
 gallery.log
 
