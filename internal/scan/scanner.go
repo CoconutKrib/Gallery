@@ -118,7 +118,7 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 		go func() {
 			defer thumbWg.Done()
 			for job := range thumbJobs {
-				path, err := GenerateThumbnail(job.SourcePath, job.SHA256, s.cfg.CacheDir)
+				path, err := GenerateThumbnail(job.SourcePath, job.SHA256, s.cfg.CacheDir, job.FileData)
 				job.ResultPath = path
 				job.Err = err
 				if err != nil {
@@ -198,7 +198,7 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 			}
 		}
 
-		hash, err := HashFile(path)
+		hash, fileData, err := ReadFileAndHash(path)
 		if err != nil {
 			slog.Warn("scan hash error", "path", path, "err", err)
 			stats.Errors++
@@ -279,12 +279,14 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 
 		s.progress(stats)
 
-		// Queue thumbnail generation (and face detection when available).
+		// Queue thumbnail generation. Pass pre-read file bytes so the
+		// thumbnail worker can decode from memory instead of re-reading.
 		thumbJobs <- &ThumbJob{
 			SourcePath: path,
 			SHA256:     hash,
 			CacheDir:   s.cfg.CacheDir,
 			PhotoID:    photoID,
+			FileData:   fileData,
 		}
 
 		return nil

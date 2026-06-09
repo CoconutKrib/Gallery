@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"bytes"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -20,6 +21,9 @@ type ThumbJob struct {
 	SHA256     string
 	CacheDir   string
 	PhotoID    int64 // set on new ingests; used for face detection (Phase B)
+	// FileData, when non-nil, contains the pre-read file bytes. The thumbnail
+	// worker decodes from memory instead of re-reading the file from disk.
+	FileData []byte
 	// Result is written back here by the worker.
 	ResultPath string
 	Err        error
@@ -28,7 +32,9 @@ type ThumbJob struct {
 // GenerateThumbnail creates a JPEG thumbnail for the image at sourcePath.
 // The thumbnail is stored under cacheDir/<first2ofHash>/<hash>.jpg.
 // If the file already exists, the path is returned without regenerating.
-func GenerateThumbnail(sourcePath, sha256, cacheDir string) (string, error) {
+// When fileData is non-nil the image is decoded from memory instead of
+// re-reading the file from disk.
+func GenerateThumbnail(sourcePath, sha256, cacheDir string, fileData []byte) (string, error) {
 	thumbPath := thumbnailPath(sha256, cacheDir)
 	if _, err := os.Stat(thumbPath); err == nil {
 		return thumbPath, nil // already exists
@@ -38,7 +44,7 @@ func GenerateThumbnail(sourcePath, sha256, cacheDir string) (string, error) {
 		return "", fmt.Errorf("creating thumbnail dir: %w", err)
 	}
 
-	src, err := decodeImage(sourcePath)
+	src, err := decodeImage(sourcePath, fileData)
 	if err != nil {
 		return "", fmt.Errorf("decoding image %s: %w", sourcePath, err)
 	}
@@ -61,7 +67,16 @@ func thumbnailPath(sha256, cacheDir string) string {
 	return filepath.Join(cacheDir, sha256[:2], sha256+".jpg")
 }
 
-func decodeImage(path string) (image.Image, error) {
+// decodeImage decodes a JPEG or HEIC image. When data is non-nil the image is
+// decoded from memory; otherwise the file at path is opened and read.
+func decodeImage(path string, data []byte) (image.Image, error) {
+	if data != nil {
+		if isHEICExtension(path) {
+			return heif.Decode(bytes.NewReader(data))
+		}
+		img, _, err := image.Decode(bytes.NewReader(data))
+		return img, err
+	}
 	if isHEICExtension(path) {
 		f, err := os.Open(path)
 		if err != nil {

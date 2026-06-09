@@ -393,6 +393,8 @@ Currently `HashFile` reads the entire file, then `GenerateThumbnail` reads it
 again. With a single `[]byte` buffer the hash can be computed and the image
 decoded from the same read. Trade-off: memory for large files.
 
+DONE.
+
 ### 6.2 Thumbnail caching before DB insert
 
 Reversing the order (write thumbnail, then DB insert) eliminates a race where
