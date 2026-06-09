@@ -4,14 +4,18 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"image/jpeg"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/halleck/gallery/internal/db"
+	"github.com/halleck/gallery/internal/heif"
 )
 
 func (h *Handlers) handlePhotos(w http.ResponseWriter, r *http.Request) {
@@ -585,7 +589,61 @@ func (h *Handlers) handlePhotoImage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
+
+	wantOriginal := r.URL.Query().Get("original") == "1"
+	wantJPEG := r.URL.Query().Get("format") == "jpeg"
+
+	// On-the-fly HEIC→JPEG transcode for browsers that can't render HEIC.
+	// Reuses the same heif.Decode → jpeg.Encode pipeline used for thumbnails.
+	if photo.Format == "heic" && wantJPEG {
+		h.serveTranscodedJPEG(w, r, photo.Filepath, sha256)
+		return
+	}
+
+	// For HEIC originals, browsers (Chrome, Firefox) cannot render them
+	// natively. Serve the pre-generated JPEG thumbnail instead, unless the
+	// caller explicitly requests the original with ?original=1.
+	if photo.Format == "heic" && !wantOriginal {
+		if len(sha256) < 2 {
+			writeError(w, http.StatusBadRequest, "invalid sha256")
+			return
+		}
+		thumbPath := filepath.Join(h.cfg.CacheDir, sha256[:2], sha256+".jpg")
+		absCache, _ := filepath.Abs(h.cfg.CacheDir)
+		absThumb, _ := filepath.Abs(thumbPath)
+		if !strings.HasPrefix(absThumb, absCache+string(filepath.Separator)) {
+			writeError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		http.ServeFile(w, r, thumbPath)
+		return
+	}
+
 	http.ServeFile(w, r, photo.Filepath)
+}
+
+// serveTranscodedJPEG decodes a HEIC file and re-encodes it as JPEG on the fly.
+func (h *Handlers) serveTranscodedJPEG(w http.ResponseWriter, r *http.Request, sourcePath, sha256 string) {
+	f, err := os.Open(sourcePath)
+	if err != nil {
+		slog.Warn("transcode: open failed", "path", sourcePath, "err", err)
+		writeError(w, http.StatusInternalServerError, "transcode error")
+		return
+	}
+	defer f.Close()
+
+	img, err := heif.Decode(f)
+	if err != nil {
+		slog.Warn("transcode: heif decode failed", "sha256", sha256, "err", err)
+		writeError(w, http.StatusInternalServerError, "transcode error")
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	if err := jpeg.Encode(w, img, &jpeg.Options{Quality: 85}); err != nil {
+		slog.Warn("transcode: jpeg encode failed", "sha256", sha256, "err", err)
+	}
 }
 
 func (h *Handlers) handlePhotoThumbnail(w http.ResponseWriter, r *http.Request) {
@@ -863,6 +921,7 @@ func photoSummaryWithMeta(p db.Photo, libraryMeta *searchLibraryMeta, people []s
 		"people":            people,
 		"thumbnail_url":     "/api/photos/" + p.SHA256 + "/thumbnail",
 		"image_url":         "/api/photos/" + p.SHA256 + "/image",
+		"format":            p.Format,
 	}
 	if out["people"] == nil {
 		out["people"] = []searchPersonSummary{}
@@ -907,6 +966,7 @@ func photoDetail(p db.Photo) map[string]any {
 		"ingested_at":     p.IngestedAt,
 		"thumbnail_url":   "/api/photos/" + p.SHA256 + "/thumbnail",
 		"image_url":       "/api/photos/" + p.SHA256 + "/image",
+		"format":          p.Format,
 	}
 }
 

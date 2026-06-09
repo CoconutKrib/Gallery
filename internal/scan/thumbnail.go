@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/halleck/gallery/internal/heif"
 	"golang.org/x/image/draw"
 )
 
@@ -61,6 +62,14 @@ func thumbnailPath(sha256, cacheDir string) string {
 }
 
 func decodeImage(path string) (image.Image, error) {
+	if isHEICExtension(path) {
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+		return heif.Decode(f)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err

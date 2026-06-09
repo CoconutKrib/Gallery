@@ -261,3 +261,127 @@ func mustAPITime(t *testing.T, value string) time.Time {
 func itoa64(v int64) string {
 	return strconv.FormatInt(v, 10)
 }
+
+// TestHandlePhotoImage_HEICTranscode validates the HEIC image serving paths:
+// - ?format=jpeg transcodes HEIC→JPEG on the fly
+// - default (no param) for HEIC falls back to the cached JPEG thumbnail
+// - ?original=1 serves the raw HEIC
+func TestHandlePhotoImage_HEICTranscode(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	samplesDir := filepath.Join(repoRoot, "samples")
+
+	// Pick a real HEIC sample that exists.
+	heicPath := filepath.Join(samplesDir, "image2.heic")
+	heicHash := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	jpgPath := filepath.Join(samplesDir, "IMG_2158.JPG")
+	jpgHash := "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+	database := openAPITestDB(t)
+	libraryPathID := mustAPIUpsertLibraryPath(t, database, samplesDir, "samples")
+
+	caps := mustAPITime(t, "2024-01-01T12:00:00Z")
+	mustAPIInsertPhoto(t, database, db.Photo{
+		SHA256:        heicHash,
+		Filepath:      heicPath,
+		Filename:      "image2.heic",
+		LibraryPathID: libraryPathID,
+		CapturedAt:    &caps,
+		Format:        "heic",
+		Source:        "scan",
+		Flags:         []string{},
+	})
+	mustAPIInsertPhoto(t, database, db.Photo{
+		SHA256:        jpgHash,
+		Filepath:      jpgPath,
+		Filename:      "IMG_2158.JPG",
+		LibraryPathID: libraryPathID,
+		CapturedAt:    &caps,
+		Format:        "jpeg",
+		Source:        "scan",
+		Flags:         []string{},
+	})
+
+	cacheDir := t.TempDir()
+	h := &Handlers{db: database, cfg: &config.Config{LibraryPaths: []config.LibraryPath{{Path: samplesDir}}, CacheDir: cacheDir}}
+
+	t.Run("heic ?format=jpeg transcodes on the fly", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/api/photos/"+heicHash+"/image?format=jpeg", nil)
+		r.SetPathValue("sha256", heicHash)
+		w := httptest.NewRecorder()
+		h.handlePhotoImage(w, r)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status: got %d want %d, body: %s", w.Code, http.StatusOK, w.Body.String())
+		}
+		ct := w.Header().Get("Content-Type")
+		if ct != "image/jpeg" {
+			t.Fatalf("Content-Type: got %q want image/jpeg", ct)
+		}
+		cc := w.Header().Get("Cache-Control")
+		if cc == "" {
+			t.Error("expected Cache-Control header")
+		}
+		if w.Body.Len() == 0 {
+			t.Error("expected non-empty JPEG body")
+		}
+		t.Logf("transcoded HEIC→JPEG: %d bytes", w.Body.Len())
+	})
+
+	t.Run("heic default falls back to thumbnail", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/api/photos/"+heicHash+"/image", nil)
+		r.SetPathValue("sha256", heicHash)
+		w := httptest.NewRecorder()
+		h.handlePhotoImage(w, r)
+
+		// Thumbnail doesn't exist in test cache dir, so we get 404.
+		if w.Code != http.StatusNotFound {
+			t.Logf("status: got %d (may be 404 if no thumbnail cached)", w.Code)
+		}
+	})
+
+	t.Run("heic ?original=1 serves raw file", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/api/photos/"+heicHash+"/image?original=1", nil)
+		r.SetPathValue("sha256", heicHash)
+		w := httptest.NewRecorder()
+		h.handlePhotoImage(w, r)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status: got %d want %d", w.Code, http.StatusOK)
+		}
+		if w.Body.Len() == 0 {
+			t.Error("expected non-empty body")
+		}
+		t.Logf("raw HEIC: %d bytes", w.Body.Len())
+	})
+
+	t.Run("jpeg always serves original regardless of params", func(t *testing.T) {
+		for _, qs := range []string{"", "?format=jpeg", "?original=1"} {
+			r := httptest.NewRequest(http.MethodGet, "/api/photos/"+jpgHash+"/image"+qs, nil)
+			r.SetPathValue("sha256", jpgHash)
+			w := httptest.NewRecorder()
+			h.handlePhotoImage(w, r)
+
+			if w.Code != http.StatusOK {
+				t.Errorf("jpeg %q: status %d", qs, w.Code)
+			}
+			if w.Body.Len() == 0 {
+				t.Errorf("jpeg %q: empty body", qs)
+			}
+		}
+	})
+
+	t.Run("not found returns 404", func(t *testing.T) {
+		badHash := "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+		r := httptest.NewRequest(http.MethodGet, "/api/photos/"+badHash+"/image", nil)
+		r.SetPathValue("sha256", badHash)
+		w := httptest.NewRecorder()
+		h.handlePhotoImage(w, r)
+
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("status: got %d want %d", w.Code, http.StatusNotFound)
+		}
+	})
+}

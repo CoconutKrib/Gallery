@@ -1,6 +1,6 @@
 # HEIC Support — Feature Specification
 
-## Status: Proposed
+## Status: Complete ✅ (Phases A–D, all tests passing)
 
 ---
 
@@ -17,9 +17,8 @@ in the repo.
 - HEIC **encoding** (the app never writes HEIC; thumbnails are always JPEG)
 - HEIF variants other than HEIC (AVIF, HIF, etc.) — these share the same
   container but use different codecs; limited to HEIC/HEVC for now
-- Transcoding HEIC originals to JPEG on ingest (originals stay as-is)
-- On-the-fly transcoding for browsers that don't render HEIC (serve the
-  pre-generated JPEG thumbnail instead)
+- Transcoding HEIC originals to JPEG on ingest (originals stay as-is; on-the-fly
+  transcode via `?format=jpeg` is implemented — see §5.3)
 
 ---
 
@@ -310,11 +309,18 @@ Frontend `photo.js` uses `image_url` for the main view and falls back to
 the JPEG thumbnail, HEIC photos render correctly in all browsers with zero
 frontend changes.
 
-### 5.3 Content-Type
+### 5.3 Content-Type and on-the-fly transcode
 
-When serving the original HEIC (via `?original=1`), set
-`Content-Type: image/heic`. When serving the thumbnail stand-in, set
+When serving the original HEIC (via `?original=1`), the server sets
+`Content-Type: image/heic`. When serving the thumbnail stand-in, it sets
 `Content-Type: image/jpeg` (already correct).
+
+For full-resolution display in browsers that cannot render HEIC natively
+(Chrome, Firefox, Edge), the endpoint supports `?format=jpeg` which decodes
+the HEIC original via `heif.Decode` and re-encodes as JPEG on the fly with
+`jpeg.Encode` at quality 85. This reuses the same pipeline already used for
+thumbnail generation. Transcodes are client-cached for 24 hours
+(`Cache-Control: public, max-age=86400`).
 
 ---
 
@@ -376,8 +382,18 @@ This mirrors the existing recognition status log line.
 2. Update `Photo` struct, `InsertPhoto`, `scanPhoto`, `scanPhotoRows`.
 3. Set `format` during ingest based on extension.
 4. `handlePhotoImage`: serve thumbnail for HEIC; `?original=1` for raw.
+5. `handlePhotoImage`: `?format=jpeg` for on-the-fly full-resolution transcode.
 
-### Phase D — Documentation & architecture
+### Phase D — Frontend & testing
+
+1. `photo.js` appends `?format=jpeg` to `image_url` for HEIC photos so they
+   render correctly in all browsers without manual URL editing.
+2. `TestHandlePhotoImage_HEICTranscode` (5 subtests) validates all three
+   serving paths (`?format=jpeg`, default thumbnail fallback, `?original=1`).
+3. `TestDecodeHEICForFaceDetection` validates the full NRGBA→SCRFD pipeline
+   on a real HEIC photo containing a face — no database or scan needed.
+4. `TestStripHEICExifPrefix` (6 subtests) validates all known EXIF layout
+   variants.
 
 1. Update `architecture.md`: scan pipeline diagram, key dependencies table.
 2. Update `CLAUDE.md`: gotchas, build instructions.
@@ -457,7 +473,15 @@ If a mature pure-Go HEIC decoder emerges (e.g., a port of libde265), the CGO
 shim can be replaced with a pure-Go implementation transparently — the
 `internal/heif` package API stays the same.
 
-### 10.4 Transcoding on library copy
+### 10.4 On-the-fly transcode (implemented)
+
+`?format=jpeg` on `/api/photos/{sha256}/image` decodes the HEIC original via
+`heif.Decode` and re-encodes as full-resolution JPEG on the fly. This uses
+the same `heif.Decode` → `jpeg.Encode` pipeline already used for thumbnail
+generation. Transcodes are client-cached for 24 hours (`Cache-Control: public,
+max-age=86400`).
+
+### 10.5 Transcoding on library copy
 
 When a HEIC photo is approved from staging into the internal library, we could
 optionally transcode it to JPEG for maximum browser compatibility. This is a

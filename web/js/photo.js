@@ -24,9 +24,15 @@ Gallery.pages.photo = async function(sha256) {
   </div>`;
 
   // Main image.
-  const img = `<img class="photo-detail-image" src="${e(photo.image_url)}"
+  // HEIC: browsers (except Safari) can't render HEIC natively. Always request
+  // a server-side transcode to JPEG via ?format=jpeg so the image displays everywhere.
+  let imageUrl = photo.image_url;
+  if (photo.format === 'heic') {
+    imageUrl += '?format=jpeg';
+  }
+  const img = `<img class="photo-detail-image" src="${e(imageUrl)}"
     alt="${e(photo.filename)}"
-    onclick="window.open('${e(photo.image_url)}','_blank')">`;
+    onclick="window.open('${e(imageUrl)}','_blank')">`;
 
   // Flags.
   let flagsHtml = '';

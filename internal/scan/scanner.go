@@ -3,8 +3,6 @@ package scan
 import (
 	"database/sql"
 	"fmt"
-	"image"
-	_ "image/jpeg"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -12,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/halleck/gallery/internal/config"
 	gdb "github.com/halleck/gallery/internal/db"
@@ -174,11 +173,17 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 		}
 
 		if s.mode == ScanModeStrict {
-			// No EXIF or camera not on whitelist — skip silently.
-			if exifData == nil || (len(s.whitelist) > 0 && !exifData.MatchesWhitelist(s.whitelist)) {
-				stats.Skipped++
-				s.progress(stats)
-				return nil
+			// When a camera whitelist is configured, require EXIF and a whitelist
+			// match. When the whitelist is empty, all photos are allowed, even
+			// those without EXIF (synthesise an empty record).
+			if len(s.whitelist) > 0 {
+				if exifData == nil || !exifData.MatchesWhitelist(s.whitelist) {
+					stats.Skipped++
+					s.progress(stats)
+					return nil
+				}
+			} else if exifData == nil {
+				exifData = &EXIFData{}
 			}
 		} else {
 			// Lenient mode: synthesise an empty EXIFData if the file has no EXIF.
@@ -302,10 +307,27 @@ func (s *Scanner) Run(rootPath string) (Stats, error) {
 	return stats, nil
 }
 
-// isSupportedExtension returns true for JPEG files. HEIC deferred to a future phase.
+// isSupportedExtension returns true for JPEG and HEIC files.
 func isSupportedExtension(name string) bool {
 	lower := strings.ToLower(name)
-	return strings.HasSuffix(lower, ".jpg") || strings.HasSuffix(lower, ".jpeg")
+	return strings.HasSuffix(lower, ".jpg") ||
+		strings.HasSuffix(lower, ".jpeg") ||
+		strings.HasSuffix(lower, ".heic") ||
+		strings.HasSuffix(lower, ".heif")
+}
+
+// isHEICExtension returns true if the filename has a HEIC/HEIF extension.
+func isHEICExtension(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.HasSuffix(lower, ".heic") || strings.HasSuffix(lower, ".heif")
+}
+
+// detectFormat returns the image format string ('jpeg' or 'heic') based on file extension.
+func detectFormat(name string) string {
+	if isHEICExtension(name) {
+		return "heic"
+	}
+	return "jpeg"
 }
 
 // detectAndStoreFaces runs SCRFD detection and ArcFace embedding on the image
@@ -328,8 +350,8 @@ func (s *Scanner) detectAndStoreFaces(sourcePath string, photoID int64) {
 		slog.Warn("face detect: open image failed", "path", sourcePath, "err", err)
 		return
 	}
-	img, _, err := image.Decode(f)
-	f.Close()
+	defer f.Close()
+	img, err := decodeImage(sourcePath)
 	if err != nil {
 		slog.Warn("face detect: decode image failed", "path", sourcePath, "err", err)
 		return
@@ -385,7 +407,17 @@ func (s *Scanner) detectAndStoreFaces(sourcePath string, photoID int64) {
 		}
 
 		if _, insertErr := gdb.InsertFace(s.db, face); insertErr != nil {
-			slog.Warn("face detect: insert face failed", "photo_id", photoID, "err", insertErr)
+			// SQLITE_BUSY can occur when thumbnail workers and the walk
+			// goroutine both write concurrently. Retry once after a short
+			// backoff — the other writer will have released the lock.
+			if strings.Contains(insertErr.Error(), "database is locked") {
+				time.Sleep(50 * time.Millisecond)
+				if _, retryErr := gdb.InsertFace(s.db, face); retryErr != nil {
+					slog.Warn("face detect: insert face failed (retry)", "photo_id", photoID, "err", retryErr)
+				}
+			} else {
+				slog.Warn("face detect: insert face failed", "photo_id", photoID, "err", insertErr)
+			}
 		}
 	}
 }
@@ -471,6 +503,7 @@ func buildPhotoRecord(e *EXIFData, hash, path, filename string, libID int64, sou
 		CameraModel:   e.CameraModel,
 		Flags:         e.Flags(),
 		Source:        source,
+		Format:        detectFormat(filename),
 	}
 	if e.CameraSerial != "" {
 		p.CameraSerial = &e.CameraSerial

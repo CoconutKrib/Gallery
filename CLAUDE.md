@@ -4,6 +4,21 @@
 
 A self-hosted family photo management webapp. Single Go binary serves both the REST API and all static frontend assets. Single-user, read-only filesystem (never writes/moves/deletes source photos).
 
+## HEIC support — build prerequisites
+
+HEIC decode is statically linked into the binary via CGO. The static libraries
+(`libheif.a`, `libde265.a`) and C headers are committed to `heif/lib/linux-x64/`
+and `heif/include/`, so **no system packages are needed** to build or run.
+
+To rebuild the static libs from source (only needed when upgrading versions):
+```bash
+./heif/build_libs.sh   # requires cmake, g++, git
+```
+
+If CGO is disabled (`CGO_ENABLED=0`), the `!cgo` stub in `internal/heif/heif_stub.go`
+kicks in — HEIC files are skipped during scan with a warning, everything else
+works normally.
+
 ## Build and run
 
 ```bash
@@ -18,7 +33,7 @@ go run . --config test_config.json --scan
 go run . --config test_config.json          # listens on :8080
 
 # Verify scan is idempotent (should show skipped:7, ingested:0)
-# (7 = 5 originals + 2 copies in samples/duplicates/)
+# (9 = 5 originals + 2 copies + 2 HEIC samples in samples/)
 go run . --config test_config.json --scan
 ```
 
@@ -39,6 +54,7 @@ go run . --config test_config.json --scan
 | Image resize | `golang.org/x/image/draw` |
 | Auth | `golang.org/x/crypto/bcrypt` |
 | Face recognition | `github.com/yalue/onnxruntime_go` — CGO, loads `libonnxruntime` at runtime (not needed at compile time) |
+| HEIC decode | Bundled `libheif` + `libde265` (static `.a` files in `heif/lib/linux-x64/`) — CGO shim via `internal/heif`; statically linked at build time, no runtime `.so` dependency |
 | Frontend | Vanilla JS, no framework, no build step |
 | Charts | Plotly basic bundle vendored at `web/vendor/plotly.min.js` |
 | Maps | Leaflet 1.9.4 vendored at `web/vendor/leaflet/` |
@@ -88,11 +104,16 @@ internal/
     library.go                 # LibraryCopy CRUD; InsertLibraryCopy, GetLibraryCopyByID, UpdateLibraryCopy, DeleteLibraryPhotoByID, ListLibraryCopiesFiltered, GetLibraryTree
     people.go                  # Person + Face CRUD; ListUnidentifiedFaces, ListUnverifiedSuggestions, GetVerifiedFacesWithEmbeddings, GetUnidentifiedFacesWithEmbeddings, SetFacePersonCandidate, MergePerson, ListFacesByPerson
   scan/
-    scanner.go                 # Walk + filter; isInternalLibraryPath() skips managed copy tree; OnProgress callback
+    scanner.go                 # Walk + filter; isInternalLibraryPath() skips managed copy tree; OnProgress callback; isSupportedExtension accepts .jpg/.jpeg/.heic/.heif
     scanner_filter_test.go     # Tests for include/exclude filter logic (case sensitivity, exclude-beats-include, multiple patterns)
-    exif.go                    # EXIF extraction; Flags() returns []string{} never nil
+    exif.go                    # EXIF extraction (JPEG via goexif, HEIC via internal/heif shim); Flags() returns []string{} never nil
     hash.go                    # SHA-256
-    thumbnail.go               # 400px long-edge JPEG; idempotent
+    thumbnail.go               # 400px long-edge JPEG; decodeImage routes HEIC through heif.Decode
+  heif/
+    heif.go                    # CGO shim: Decode → image.NRGBA, DecodeConfig, ExtractEXIF → raw TIFF; statically links bundled libheif+libde265
+    heif_stub.go               # !cgo fallback returning ErrNotAvailable
+    heif_test.go               # Unit tests (decode, EXIF prefix stripping, invalid input)
+    face_detect_test.go        # Targeted test: HEIC decode → NRGBA → SCRFD face detection
   cluster/
     cluster.go                 # Rule-based event clustering (gap days + geo distance); called after every scan
   recognition/
@@ -159,6 +180,7 @@ samples/
   - **Phase B (auto face detection)**: `internal/recognition` package (SCRFD + ArcFace ONNX sessions via `onnxruntime_go`); scanner auto-detects faces and stores bounding boxes + 512-dim embeddings per photo; `GET /api/recognition/status` endpoint; recognition-gated 501/503 responses.
   - **Phase C (identity clustering + review UI)**: Post-scan suggestion pipeline (per-person mean embedding nearest-neighbour matching) + union-find clustering of unidentified faces; in-memory cluster store; `/api/faces/unidentified`, `/api/faces/suggestions`, `/api/faces/cluster` endpoints; `/faces/review` two-panel UI; recognition status section in Settings.
 - ✅ **Phase 11** — Settings synchronization overhaul: settings page reorganised into editable sections mapped to current `Config` fields (scan paths, whitelist, filename filters, scan/event tuning, logging, auth, face recognition), with section-local save actions using partial `POST /api/settings` payloads.
+- ✅ **Phase 12** — HEIC support: `internal/heif` CGO shim with statically-linked `libheif` + `libde265` (bundled `.a` files in `heif/lib/linux-x64/`). `isSupportedExtension` accepts `.heic`/`.heif`. `decodeImage` routes HEIC for thumbnails and face detection. `ReadEXIF` extracts HEIC EXIF via `heif.ExtractEXIF` → `goexif`. Migration `005_heic.sql` adds `photos.format` column (`'jpeg'`/`'heic'`). `handlePhotoImage` serves JPEG thumbnail for HEIC; `?format=jpeg` on-the-fly transcode; `?original=1` for raw download. `photo.js` auto-appends `?format=jpeg` for HEIC photos. Full test coverage: 8 heif unit tests, 5 transcode API tests, 1 face-detection integration test. HEIC files are on par with JPEGs across all subsystems (foreign keys, tags, people, events, library copy, dedup).
 
 ## Known issues / backlog (from TODO.md)
 
@@ -169,9 +191,9 @@ samples/
 
 ## Sample data
 
-`samples/` contains 5 test JPEGs from 4 cameras (HTC One, Canon EOS 700D, Apple iPhone SE, Samsung Techwin L100). The iPhone SE photo has real GPS coordinates. `test_config.json` whitelists all four cameras with `scan_workers: 2`.
+`samples/` contains 5 test JPEGs from 4 cameras (HTC One, Canon EOS 700D, Apple iPhone SE, Samsung Techwin L100) plus 3 HEIC samples (`image1.heic`, `image2.heic` with EXIF, and `heic_face.heic` containing a detectable face). The iPhone SE photo has real GPS coordinates. `test_config.json` whitelists all four cameras with `scan_workers: 2`.
 
-`samples/duplicates/` contains byte-identical copies of `SDC12869.JPG` and `IMG_0361.JPG`, used to exercise the duplicate detection and dedup report. A clean scan should show: found:7, ingested:5, duplicate:2, then cluster into 4 events.
+`samples/duplicates/` contains byte-identical copies of `SDC12869.JPG` and `IMG_0361.JPG`, used to exercise the duplicate detection and dedup report. A clean scan should show: found:9, ingested:7, duplicate:2, then cluster into 5 events (the 2 HEIC samples without dates fall into `_undated`).
 
 ## Gotchas encountered
 
@@ -189,3 +211,8 @@ samples/
 - **Face recognition is always compiled in** — `internal/recognition` uses CGO (`onnxruntime_go`) but `libonnxruntime` does NOT need to be present at compile time. The library is loaded at runtime via `SetSharedLibraryPath`. If loading fails, the server starts normally and recognition endpoints return 501/503.
 - **Double-pointer pattern in `FaceUpdate`** — `**int64` / `**float64` fields: outer `nil` = skip, outer non-nil inner nil = set column to NULL. Same pattern as `LibraryCopyUpdate`.
 - **`cluster_id` is ephemeral** — face clusters are stored only in memory (`recognition.SetClusters`). They are recomputed after each scan and on `POST /api/faces/cluster`. A server restart clears them; the review UI handles this gracefully (faces show `cluster_id: null`).
+- **HEIC static linking** — `internal/heif` uses `#cgo LDFLAGS` to statically link the bundled `.a` files. The libraries are committed to git (`heif/lib/linux-x64/`) so no system packages are needed. If you need to upgrade libheif/libde265, run `./heif/build_libs.sh` and commit the new `.a` files. The C headers in `heif/include/` must match the `.a` versions.
+- **HEIC EXIF extraction** — HEIC stores EXIF in an ISOBMFF container (`Exif` item), not a JPEG APP1 segment. `goexif` cannot read this directly. The `internal/heif` shim extracts the raw bytes via `libheif`'s metadata API, then `stripHEICExifPrefix()` removes the HEIC wrapper bytes (handling three known layouts: "Exif\0\0" box prefix, 4-byte offset prefix, and bare TIFF) before passing to `goexif.Decode`.
+- **HEIC serving paths** — Three query-param modes on `/api/photos/{sha256}/image`: (1) no param → HEIC serves 400px JPEG thumbnail, JPEG serves original; (2) `?original=1` → serves raw HEIC file; (3) `?format=jpeg` → on-the-fly full-resolution HEIC→JPEG transcode via `heif.Decode` + `jpeg.Encode`. `photo.js` auto-appends `?format=jpeg` for HEIC photos so they render in all browsers.
+- **Nil EXIF + empty whitelist** — When the camera whitelist is empty, photos without EXIF are allowed through (synthesised empty EXIFData). Previously they were skipped even with no whitelist configured. This matters for HEIC files that lack EXIF metadata (e.g. `heic_face.heic`).
+- **`detectAndStoreFaces` SQLITE_BUSY** — Face detection runs in thumbnail worker goroutines concurrent with the walk goroutine. Face inserts retry once after 50ms on `database is locked` errors to avoid losing detections in WAL mode.

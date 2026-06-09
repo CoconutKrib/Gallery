@@ -215,7 +215,7 @@ func countSupportedImages(t *testing.T, root string) int {
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(d.Name()))
-		if ext == ".jpg" || ext == ".jpeg" {
+		if ext == ".jpg" || ext == ".jpeg" || ext == ".heic" || ext == ".heif" {
 			count++
 		}
 		return nil

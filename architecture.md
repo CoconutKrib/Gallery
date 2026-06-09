@@ -40,6 +40,10 @@ gallery/
 ├── config.json              # Runtime configuration (user-editable)
 ├── gallery.db               # SQLite database (generated at runtime)
 ├── .cache/                  # Thumbnail cache (generated at runtime)
+├── heif/                    # Bundled static HEIC decode libraries (libheif + libde265)
+│   ├── build_libs.sh        # One-time script to build .a files from source
+│   ├── include/             # C headers (committed)
+│   └── lib/linux-x64/       # Static libraries (committed, ~4.7 MB)
 │
 ├── internal/
 │   ├── config/
@@ -80,6 +84,11 @@ gallery/
 │   │
 │   ├── library/
 │   │   └── copy.go          # CopyToLibrary: path construction, collision resolution, os.Copy, DB insert; bulk copy triggers cluster.Run
+│   │
+│   ├── heif/
+│   │   ├── heif.go           # CGO shim: statically links bundled libheif+libde265; Decode, DecodeConfig, ExtractEXIF
+│   │   ├── heif_stub.go      # !cgo fallback returning ErrNotAvailable
+│   │   └── heif_test.go      # Unit tests (decode real HEIC, EXIF extraction, invalid input)
 │   │
 │   ├── api/
 │   │   ├── router.go        # Route registration, Handlers struct, authMiddleware
@@ -208,7 +217,7 @@ After all paths scanned:
 
 **Thumbnail worker pool**: ingest enqueues thumbnail jobs onto a buffered channel. A fixed pool of `ScanWorkers` goroutines consumes the channel. This keeps image decoding/resizing parallel while preventing memory exhaustion.
 
-**HEIC support**: deferred — the pure-Go pipeline currently handles JPEG only (`isSupportedExtension` accepts `.jpg`/`.jpeg`). Extension check is case-insensitive.
+**HEIC support**: HEIC/HEIF files are handled throughout the pipeline. A CGO shim (`internal/heif`) statically links bundled `libheif` + `libde265` (committed as `.a` files in `heif/lib/linux-x64/`). `isSupportedExtension` accepts `.heic`/`.heif` alongside `.jpg`/`.jpeg`. `decodeImage` routes HEIC through the shim to produce `image.NRGBA` for thumbnails and face detection. `ReadEXIF` extracts HEIC EXIF via the shim (HEIC stores EXIF in an ISOBMFF container, not a JPEG APP1 segment, so `goexif` cannot find it directly). The `photos.format` column tracks `'jpeg'` vs `'heic'` per ingested photo. When serving HEIC originals to browsers, the pre-generated JPEG thumbnail is served instead (most browsers cannot render HEIC natively); `?original=1` forces raw HEIC download; `?format=jpeg` transcodes the full-resolution HEIC to JPEG on the fly via the existing `heif.Decode` → `jpeg.Encode` pipeline.
 
 **Internal library path exclusion**: at the start of every scan walk, `scanner.go` must compare the walk root against `config.InternalLibrary.Path` (and `config.Dropzone.Path` for dropzone-aware scans). If a root equals or is a subdirectory of the internal library path it is silently skipped before walking. This prevents the managed copy tree from being inadvertently treated as a source.
 
@@ -361,10 +370,11 @@ CMD ["./gallery", "--config", "/data/config.json"]
 | `golang.org/x/image` | Image decoding/resizing for thumbnails |
 | `golang.org/x/crypto/bcrypt` | Password hashing |
 | `github.com/yalue/onnxruntime_go` | CGO bindings for ONNX Runtime; loads `libonnxruntime` dynamically at runtime |
+| `libheif` + `libde265` (bundled, static `.a`) | HEIC/HEIF decode, EXIF extraction; statically linked into binary via CGO shim (`internal/heif`) |
 | Plotly.js (vendored, basic bundle) | Timeline bar chart |
 | Leaflet 1.9.4 (vendored) | Interactive geo map |
 
-HEIC support is deferred. There is no npm build step.
+There is no npm build step.
 
 ---
 
@@ -431,3 +441,8 @@ HEIC support is deferred. There is no npm build step.
 - **Phase A (manual tagging)**: migration `004_people.sql` (`people` table + extended `faces`); full CRUD API for people and face tags; tagging panel in `library.js` edit panel; `/people` browse + `/people/{id}` detail with edit, delete, and merge actions.
 - **Phase B (auto face detection)**: `internal/recognition` package (SCRFD-10G + ArcFace/R50 via `onnxruntime_go`); scanner auto-detects faces and stores bbox + 512-dim embeddings; `GET /api/recognition/status`; recognition-gated 501/503 on recognition endpoints.
 - **Phase C (identity clustering + review UI)**: post-scan suggestion pipeline (per-person mean embedding nearest-neighbour); union-find clustering of unidentified faces; in-memory cluster store; `/api/faces/unidentified`, `/api/faces/suggestions`, `/api/faces/cluster`; `/faces/review` two-panel UI; recognition status section in Settings.
+
+### Phase 11 — HEIC support ✅
+- **Phase A (library bundling & CGO shim)**: `heif/build_libs.sh` builds `libde265` v1.0.15 + `libheif` v1.18.2 as static `.a` files committed to `heif/lib/linux-x64/`. C headers committed to `heif/include/`. `internal/heif` package provides `Decode` → `image.NRGBA`, `DecodeConfig`, `ExtractEXIF` → raw TIFF bytes. `!cgo` stub returns `ErrNotAvailable`. All 8 unit tests pass.
+- **Phase B (scan pipeline integration)**: `isSupportedExtension` accepts `.heic`/`.heif`. `decodeImage` routes HEIC through `heif.Decode` for thumbnail generation and face detection. `ReadEXIF` extracts HEIC EXIF via `heif.ExtractEXIF` → `goexif` bridge.
+- **Phase C (database & serving)**: Migration `005_heic.sql` adds `format` column (`'jpeg'`/`'heic'`). `Photo.Format` field populated at ingest, exposed in API responses. `handlePhotoImage` serves the pre-generated JPEG thumbnail for HEIC originals (browsers can't render HEIC natively); `?original=1` forces raw download; `?format=jpeg` transcodes full-resolution HEIC→JPEG on the fly via the existing `heif.Decode` → `jpeg.Encode` pipeline.

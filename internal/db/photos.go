@@ -11,7 +11,7 @@ const photoSelectCols = `id, sha256, filepath, library_path_id, filename,
 	captured_at, latitude, longitude, altitude,
 	camera_make, camera_model, camera_serial, lens_model,
 	iso, aperture, shutter_speed, focal_length, flash,
-	width, height, orientation, thumbnail_path, flags, ingested_at, source`
+	width, height, orientation, thumbnail_path, flags, ingested_at, source, format`
 
 // Photo represents a row in the photos table.
 type Photo struct {
@@ -40,6 +40,7 @@ type Photo struct {
 	Flags         []string
 	IngestedAt    time.Time
 	Source        string // 'scan' or 'dropzone'
+	Format        string // 'jpeg' or 'heic'
 }
 
 // InsertPhoto inserts a new photo record. Returns the new row ID.
@@ -59,13 +60,13 @@ func InsertPhoto(db *sql.DB, p *Photo) (int64, error) {
 			captured_at, latitude, longitude, altitude,
 			camera_make, camera_model, camera_serial, lens_model,
 			iso, aperture, shutter_speed, focal_length, flash,
-			width, height, orientation, thumbnail_path, flags, source
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			width, height, orientation, thumbnail_path, flags, source, format
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.SHA256, p.Filepath, p.LibraryPathID, p.Filename,
 		capturedAt, p.Latitude, p.Longitude, p.Altitude,
 		p.CameraMake, p.CameraModel, p.CameraSerial, p.LensModel,
 		p.ISO, p.Aperture, p.ShutterSpeed, p.FocalLength, p.Flash,
-		p.Width, p.Height, p.Orientation, p.ThumbnailPath, string(flagsJSON), sourceVal(p.Source),
+		p.Width, p.Height, p.Orientation, p.ThumbnailPath, string(flagsJSON), sourceVal(p.Source), formatVal(p.Format),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("inserting photo: %w", err)
@@ -79,6 +80,14 @@ func sourceVal(s string) string {
 		return "scan"
 	}
 	return s
+}
+
+// formatVal returns 'jpeg' as a default when format is empty (backfill for pre-migration rows).
+func formatVal(f string) string {
+	if f == "" {
+		return "jpeg"
+	}
+	return f
 }
 
 // PhotoExistsByHash returns true if a photo with the given SHA256 exists.
@@ -115,7 +124,7 @@ func scanPhoto(row *sql.Row) (*Photo, error) {
 		&p.CapturedAt, &p.Latitude, &p.Longitude, &p.Altitude,
 		&p.CameraMake, &p.CameraModel, &p.CameraSerial, &p.LensModel,
 		&p.ISO, &p.Aperture, &p.ShutterSpeed, &p.FocalLength, &p.Flash,
-		&p.Width, &p.Height, &p.Orientation, &p.ThumbnailPath, &flagsJSON, &p.IngestedAt, &p.Source,
+		&p.Width, &p.Height, &p.Orientation, &p.ThumbnailPath, &flagsJSON, &p.IngestedAt, &p.Source, &p.Format,
 	); err != nil {
 		return nil, err
 	}
@@ -131,7 +140,7 @@ func scanPhotoRows(rows *sql.Rows) (*Photo, error) {
 		&p.CapturedAt, &p.Latitude, &p.Longitude, &p.Altitude,
 		&p.CameraMake, &p.CameraModel, &p.CameraSerial, &p.LensModel,
 		&p.ISO, &p.Aperture, &p.ShutterSpeed, &p.FocalLength, &p.Flash,
-		&p.Width, &p.Height, &p.Orientation, &p.ThumbnailPath, &flagsJSON, &p.IngestedAt, &p.Source,
+		&p.Width, &p.Height, &p.Orientation, &p.ThumbnailPath, &flagsJSON, &p.IngestedAt, &p.Source, &p.Format,
 	); err != nil {
 		return nil, err
 	}

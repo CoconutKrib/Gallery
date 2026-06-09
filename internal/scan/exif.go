@@ -1,12 +1,14 @@
 package scan
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/halleck/gallery/internal/heif"
 	"github.com/rwcarlsen/goexif/exif"
 )
 
@@ -44,8 +46,17 @@ const (
 )
 
 // ReadEXIF reads EXIF metadata from the file at path.
+// Supports JPEG (via goexif) and HEIC (via the internal/heif shim).
 // Returns (nil, nil) if the file has no EXIF at all (not an error — caller decides).
 func ReadEXIF(path string) (*EXIFData, error) {
+	if isHEICExtension(path) {
+		return readHEICEXIF(path)
+	}
+	return readJPEGEXIF(path)
+}
+
+// readJPEGEXIF reads EXIF from a JPEG file using goexif.
+func readJPEGEXIF(path string) (*EXIFData, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("opening file for exif: %w", err)
@@ -54,10 +65,40 @@ func ReadEXIF(path string) (*EXIFData, error) {
 
 	x, err := exif.Decode(f)
 	if err != nil {
-		// No EXIF data is not a hard error; signal with nil.
 		return nil, nil //nolint:nilerr
 	}
 
+	return extractEXIFFields(x), nil
+}
+
+// readHEICEXIF reads EXIF from a HEIC file via the internal/heif shim.
+// HEIC stores EXIF inside the ISOBMFF container rather than a JPEG APP1 segment,
+// so goexif cannot find it directly.
+func readHEICEXIF(path string) (*EXIFData, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("opening file for exif: %w", err)
+	}
+	defer f.Close()
+
+	exifBytes, err := heif.ExtractEXIF(f)
+	if err != nil {
+		return nil, nil // not an error — just no readable EXIF
+	}
+	if len(exifBytes) == 0 {
+		return nil, nil
+	}
+
+	x, err := exif.Decode(bytes.NewReader(exifBytes))
+	if err != nil {
+		return nil, nil
+	}
+
+	return extractEXIFFields(x), nil
+}
+
+// extractEXIFFields populates an EXIFData struct from a parsed exif.Exif.
+func extractEXIFFields(x *exif.Exif) *EXIFData {
 	data := &EXIFData{}
 
 	data.CameraMake = stringTag(x, exif.Make)
@@ -104,7 +145,7 @@ func ReadEXIF(path string) (*EXIFData, error) {
 		data.Orientation = o
 	}
 
-	return data, nil
+	return data
 }
 
 // Flags computes the data-deficiency flag list for an ingested EXIFData.
