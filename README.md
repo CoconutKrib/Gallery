@@ -110,12 +110,14 @@ Open [http://localhost:8080](http://localhost:8080) in your browser.
 When `face_recognition.enabled` is true, configure:
 
 - `onnxruntime_lib`: path to `libonnxruntime`
-- `model_dir`: directory containing models
-- `detection_model`: detector filename (for example `det_10g.onnx`)
-- `recognition_model`: embedder filename (for example `w600k_r50.onnx`)
-- `detection_threshold`: face detector score threshold
-- `recognition_threshold`: embedding match threshold
-- `cluster_min_samples`: minimum cluster size for review grouping
+- `model_dir`: directory containing ONNX model files
+- `detection_model`: detector filename (default: `det_10g.onnx`, SCRFD‑10G)
+- `recognition_model`: embedder filename (default: `w600k_r50.onnx`, ArcFace ResNet‑50)
+- `detection_threshold`: face detector score threshold (default: 0.5)
+- `recognition_threshold`: embedding match threshold (default: 0.8)
+- `cluster_min_samples`: minimum cluster size for review grouping (default: 5)
+
+The default models are from the [InsightFace Buffalo_L](https://github.com/deepinsight/insightface) package. When `detection_model` or `recognition_model` is left empty, the binary looks for `det_10g.onnx` and `w600k_r50.onnx` respectively inside `model_dir`. Only the detection model is required; if the recognition model is missing, the server runs in detection‑only mode (faces are found but not embedded or clustered).
 
 ### Enabling password protection
 
@@ -178,3 +180,57 @@ go test ./...
 ```
 
 The frontend is plain vanilla JS with no build step. Edit files under `web/` and reload the browser.
+
+## Packaging for deployment
+
+`package.sh` builds the binary and bundles it with its runtime dependencies into a `.tar.gz` ready for deployment on another Linux x64 machine.
+
+```bash
+./package.sh          # CPU-only build (default, smaller)
+./package.sh --gpu    # GPU build with CUDA/TensorRT providers
+```
+
+**What's included:**
+
+| Component | Source |
+|---|---|
+| `gallery` binary | Built from source with `-ldflags="-s -w"` |
+| `lib/libonnxruntime.so*` | ONNX runtime shared library (face recognition) |
+| `models/det_10g.onnx` | SCRFD face detection model (17 MB) |
+| `models/w600k_r50.onnx` | ArcFace face embedding model (167 MB) |
+| `config.json.example` | Template config with relative paths |
+
+Web assets and HEIC decode libraries are statically linked into the binary — no extra files needed for those.
+
+**Prerequisites for face recognition:** Before running `package.sh`, download the ONNX runtime into the `onnx/` directory. The script auto-detects whichever variant is present:
+
+```bash
+# CPU build (~15 MB library, smaller package):
+wget https://github.com/microsoft/onnxruntime/releases/download/v1.26.0/onnxruntime-linux-x64-1.26.0.tgz
+tar -xzf onnxruntime-linux-x64-1.26.0.tgz -C onnx/
+
+# GPU build (~440 MB library, CUDA 12 + TensorRT):
+wget https://github.com/microsoft/onnxruntime/releases/download/v1.26.0/onnxruntime-linux-x64-gpu-1.26.0.tgz
+tar -xzf onnxruntime-linux-x64-gpu-1.26.0.tgz -C onnx/
+```
+
+The InsightFace models in `insightface/buffalo_l/` are also required. Only `det_10g.onnx` and `w600k_r50.onnx` are packaged (the other three buffalo_l models are unused by gallery).
+
+**Approximate package sizes:**
+
+| Variant | Tarball |
+|---|---|
+| CPU (no GPU providers) | ~180 MB |
+| GPU (+ CUDA/TensorRT) | ~360 MB |
+
+**Deploying the package:**
+
+```bash
+tar -xzf gallery-<version>.tar.gz
+cd gallery-<version>
+cp config.json.example config.json   # edit scan_paths etc.
+mkdir -p .cache
+./gallery --config config.json
+```
+
+The example config uses relative paths (`./lib/libonnxruntime.so`, `./models`) so everything works as long as you run `gallery` from the package directory.

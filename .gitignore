@@ -3,6 +3,7 @@ samples/
 
 #supporting libs
 onnx/
+onnxruntime-*.tgz
 insightface/
 
 # HEIC build artifacts (static .a libs and headers are committed)
