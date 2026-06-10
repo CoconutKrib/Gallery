@@ -130,22 +130,25 @@ func Init(cfg config.FaceRecognitionConfig, database *sql.DB) Status {
 	}
 
 	// Load the ArcFace recognition model if configured.
-	// If missing, enter detection-only mode.
+	// If the config field is empty, try the default w600k_r50.onnx.
+	// If the file is missing or fails to load, enter detection-only mode.
+	recModel := cfg.RecognitionModel
+	if recModel == "" {
+		recModel = "w600k_r50.onnx"
+	}
 	var embedder *Embedder
-	if cfg.RecognitionModel != "" {
-		recPath := filepath.Join(cfg.ModelDir, cfg.RecognitionModel)
-		if _, statErr := os.Stat(recPath); statErr == nil {
-			var embErr error
-			embedder, embErr = newEmbedder(recPath, sessOpts)
-			if embErr != nil {
-				slog.Warn("recognition: embedder init failed, detection-only mode", "err", embErr)
-				embedder = nil
-			} else {
-				slog.Info("recognition: embedder loaded", "model", recPath)
-			}
+	recPath := filepath.Join(cfg.ModelDir, recModel)
+	if _, statErr := os.Stat(recPath); statErr == nil {
+		var embErr error
+		embedder, embErr = newEmbedder(recPath, sessOpts)
+		if embErr != nil {
+			slog.Warn("recognition: embedder init failed, detection-only mode", "err", embErr)
+			embedder = nil
 		} else {
-			slog.Info("recognition: recognition model not found, detection-only mode", "path", recPath)
+			slog.Info("recognition: embedder loaded", "model", recPath)
 		}
+	} else {
+		slog.Info("recognition: recognition model not found, detection-only mode", "path", recPath)
 	}
 
 	slog.Info("recognition: ready", "ep", ep, "embedder_loaded", embedder != nil)
